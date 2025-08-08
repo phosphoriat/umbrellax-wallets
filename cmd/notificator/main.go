@@ -1,0 +1,5 @@
+package notificator
+
+func main() {
+
+}
