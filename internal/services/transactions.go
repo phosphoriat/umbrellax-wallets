@@ -2,6 +2,7 @@ package services
 
 type TransactionsService struct{}
 
+// NewTransactionsService Create new instance of TransactionsService
 func NewTransactionsService() *TransactionsService {
 	return &TransactionsService{}
 }

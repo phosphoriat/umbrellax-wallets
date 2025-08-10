@@ -2,13 +2,14 @@ package services
 
 type WalletsService struct{}
 
+// NewWalletsService Create new instance of WalletsService
 func NewWalletsService() *WalletsService {
 	return &WalletsService{}
 }
 
 // GetUserWallet
 // Get user HD-wallet by user id
-func (s *WalletsService) GetUserWallet(userId int) map[string]string {
+func (s *WalletsService) GetUserWallet(userId int, network string) map[string]string {
 	arr := make(map[string]string)
 	return arr
 }

@@ -1,34 +1,36 @@
-package handlers
+package routes
 
 import (
+	"wallets/internal/handlers"
 	"wallets/internal/services"
 
 	"github.com/gofiber/fiber/v2"
 )
 
 func SetupRoutes(app *fiber.App) {
+	// Set api routes group
 	api := app.Group("/api")
 
 	// Init route handlers
-	tokensHandler := NewTokensHandler(services.NewTokensService())
-	walletsHandler := NewWalletsHandler(services.NewWalletsService())
-	transactionsHandler := NewTransactionsHandler(services.NewTransactionsService())
+	tokensHandler := handlers.NewTokensHandler(services.NewTokensService())
+	walletsHandler := handlers.NewWalletsHandler(services.NewWalletsService())
+	transactionsHandler := handlers.NewTransactionsHandler(services.NewTransactionsService())
 
 	// Health check
 	api.Get("/health", func(c *fiber.Ctx) error {
-		return c.SendStatus(fiber.StatusOK)
+		return c.JSON(fiber.Map{"status": "ok"})
 	})
 
-	// Token route group
+	// Tokens routes group
 	tokens := api.Group("/tokens")
 	tokens.Get("/", tokensHandler.GetTokenInfo)
 
-	// Wallets route group
+	// Wallets routes group
 	wallets := api.Group("/wallets")
 	wallets.Get("/", walletsHandler.GetUserWallet)
 	wallets.Get("/master", walletsHandler.GetMasterWallet)
 
-	// Transactions route group
+	// Transactions routes group
 	transactions := api.Group("/transactions")
 	transactions.Get("/commission", transactionsHandler.GetTransactionCommission)
 	transactions.Get("/status", transactionsHandler.GetTransactionStatus)
