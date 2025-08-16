@@ -1,4 +1,4 @@
-package database
+package vault
 
 import (
 	"context"
@@ -14,8 +14,8 @@ import (
 // Global Vault connection var
 var vaultClient *api.Client
 
-// InitVault Init connection to Vault
-func InitVault(cfg *config.Config) error {
+// Init connection to Vault
+func Init(cfg *config.Config) error {
 	// Configure Vault client
 	vaultConfig := api.DefaultConfig()
 	vaultConfig.Address = fmt.Sprintf("%s://%s:%s", cfg.VaultScheme, cfg.VaultHost, cfg.VaultPort)
@@ -54,7 +54,7 @@ func InitVault(cfg *config.Config) error {
 
 	// Auth using AppRole, if defined in config
 	if cfg.VaultRoleId != "" && cfg.VaultSecretId != "" {
-		if err := AuthWithAppRole(cfg.VaultRoleId, cfg.VaultSecretId); err != nil {
+		if err := authWithAppRole(cfg.VaultRoleId, cfg.VaultSecretId); err != nil {
 			return fmt.Errorf("failed to auth with AppRole: %w", err)
 		}
 		log.Println("Successfully auth with Vault using AppRole")
@@ -68,40 +68,13 @@ func GetVaultClient() *api.Client {
 	return vaultClient
 }
 
-// CloseVault Close Vault connection (cleanup)
-func CloseVault() error {
+// Close Vault connection (cleanup)
+func Close() error {
 	if vaultClient != nil {
 		// Vault client doesn't need explicit closing, but we can clear the token
 		vaultClient.ClearToken()
 		vaultClient = nil
 	}
-
-	return nil
-}
-
-// AuthWithAppRole Auth using AppRole method
-func AuthWithAppRole(roleID, secretID string) error {
-	if vaultClient == nil {
-		return fmt.Errorf("vault client not initialized")
-	}
-
-	// Prepare AppRole authentication data
-	data := map[string]interface{}{
-		"role_id":   roleID,
-		"secret_id": secretID,
-	}
-
-	// Try to auth
-	resp, err := vaultClient.Logical().Write("auth/approle/login", data)
-	if err != nil {
-		return fmt.Errorf("AppRole authentication failed: %w", err)
-	}
-	if resp == nil || resp.Auth == nil {
-		return fmt.Errorf("AppRole authentication returned empty response")
-	}
-
-	// Set the token from the response
-	vaultClient.SetToken(resp.Auth.ClientToken)
 
 	return nil
 }
@@ -166,38 +139,29 @@ func SetSecret(path string, data map[string]interface{}) error {
 	return nil
 }
 
-// DeleteSecret Delete secret from Vault
-func DeleteSecret(path string) error {
+// @private authWithAppRole Auth using AppRole method
+func authWithAppRole(roleID, secretID string) error {
 	if vaultClient == nil {
 		return fmt.Errorf("vault client not initialized")
 	}
 
-	_, err := vaultClient.Logical().Delete(path)
-	if err != nil {
-		return fmt.Errorf("failed to delete secret at %s: %w", path, err)
+	// Prepare AppRole authentication data
+	data := map[string]interface{}{
+		"role_id":   roleID,
+		"secret_id": secretID,
 	}
+
+	// Try to auth
+	resp, err := vaultClient.Logical().Write("auth/approle/login", data)
+	if err != nil {
+		return fmt.Errorf("AppRole authentication failed: %w", err)
+	}
+	if resp == nil || resp.Auth == nil {
+		return fmt.Errorf("AppRole authentication returned empty response")
+	}
+
+	// Set the token from the response
+	vaultClient.SetToken(resp.Auth.ClientToken)
 
 	return nil
-}
-
-// ListSecrets List secrets at given path
-func ListSecrets(path string) ([]interface{}, error) {
-	if vaultClient == nil {
-		return nil, fmt.Errorf("vault client not initialized")
-	}
-
-	secret, err := vaultClient.Logical().List(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to list secrets at %s: %w", path, err)
-	}
-
-	if secret == nil || secret.Data == nil {
-		return []interface{}{}, nil
-	}
-
-	if keys, ok := secret.Data["keys"].([]interface{}); ok {
-		return keys, nil
-	}
-
-	return []interface{}{}, nil
 }

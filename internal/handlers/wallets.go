@@ -13,14 +13,14 @@ type (
 		service *services.WalletsService
 	}
 
-	// GetUserWalletQuery validation params
+	// GetUserWalletQuery validation rules
 	GetUserWalletQuery struct {
-		Network string `validate:"required,oneof=trc20 erc20 bep20 ton bitcoin solana"`
+		Network string `validate:"required,oneof=tron eth bsc ton bitcoin solana"`
 		UserId  int    `validate:"required,integer"`
 	}
-	// GetMasterWalletQuery validation params
+	// GetMasterWalletQuery validation rules
 	GetMasterWalletQuery struct {
-		Network string `validate:"required,oneof=trc20 erc20 bep20 ton bitcoin solana"`
+		Network string `validate:"required,oneof=tron eth bsc ton bitcoin solana"`
 	}
 )
 
@@ -38,10 +38,13 @@ func (h *WalletsHandler) GetUserWallet(c *fiber.Ctx) error {
 	}
 
 	if err := middleware.ValidateStruct(params); err != nil {
-		return err
+		return c.JSON(err)
 	}
 
-	res := h.service.GetUserWallet(params.UserId, params.Network)
+	res, err := h.service.GetUserWallet(params.UserId, params.Network)
+	if err != nil {
+		return c.JSON(err)
+	}
 	return c.JSON(fiber.Map{"address": res})
 }
 
@@ -53,9 +56,12 @@ func (h *WalletsHandler) GetMasterWallet(c *fiber.Ctx) error {
 	}
 
 	if err := middleware.ValidateStruct(params); err != nil {
-		return err
+		return c.JSON(err)
 	}
 
-	res := h.service.GetMasterWallet(params.Network)
-	return c.JSON(fiber.Map{"wallet": res})
+	res, err := h.service.GetMasterWallet(params.Network)
+	if err != nil {
+		return c.JSON(err)
+	}
+	return c.JSON(res)
 }

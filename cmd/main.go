@@ -21,6 +21,9 @@ import (
 func main() {
 	// Load config
 	cfg := config.Load()
+	if cfg == nil {
+		log.Fatal("Failed to load config.")
+	}
 
 	// Init database (PgSQL, ClickHouse, Redis, Vault) connections
 	if err := database.InitDB(cfg); err != nil {
@@ -73,11 +76,11 @@ func main() {
 		}
 	}()
 
-	// Graceful shutdown
+	// Graceful server shutdown
 	gracefulShutdown(app)
 }
 
-// Graceful shutdown
+// gracefulShutdown Graceful server shutdown
 func gracefulShutdown(app *fiber.App) {
 	// Create channel to signify a signal being sent
 	c := make(chan os.Signal, 1)

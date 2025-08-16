@@ -8,7 +8,10 @@ func NewTokensService() *TokensService {
 }
 
 // GetTokenInfo Get token info by ticker
-func (s *TokensService) GetTokenInfo(ticker string) map[string]string {
-	arr := make(map[string]string)
-	return arr
+func (service *TokensService) GetTokenInfo(ticker string) (map[string]any, error) {
+	token := make(map[string]any)
+
+	return map[string]any{
+		"token": token,
+	}, nil
 }

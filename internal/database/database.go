@@ -4,6 +4,8 @@ import (
 	"log"
 
 	"wallets/internal/config"
+	"wallets/internal/database/redis"
+	"wallets/internal/database/vault"
 )
 
 // InitDB Initialize all connections
@@ -29,21 +31,21 @@ func InitDB(cfg *config.Config) error {
 	}()
 
 	// Init Redis connection
-	if err := InitRedis(cfg); err != nil {
+	if err := redis.Init(cfg); err != nil {
 		log.Fatal("Failed to initialize Redis:", err)
 	}
 	defer func() {
-		if err := CloseRedis(); err != nil {
+		if err := redis.Close(); err != nil {
 			log.Printf("Error closing Redis: %v", err)
 		}
 	}()
 
 	// Init Vault connection
-	if err := InitVault(cfg); err != nil {
+	if err := vault.Init(cfg); err != nil {
 		log.Fatal("Failed to initialize Vault:", err)
 	}
 	defer func() {
-		if err := CloseVault(); err != nil {
+		if err := vault.Close(); err != nil {
 			log.Printf("Error closing Vault: %v", err)
 		}
 	}()

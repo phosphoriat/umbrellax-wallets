@@ -18,7 +18,7 @@ var pgsqlConnection *gorm.DB
 func InitPgSQL(cfg *config.Config) error {
 	// Form DSN pgsqlConnection configuration string
 	dsn := fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%s sslmode=%s TimeZone=UTC",
-		cfg.DbHost, cfg.DbUser, cfg.DbPassword, cfg.DbName, cfg.DbPort, cfg.DbSSLMode)
+		cfg.DbHost, cfg.DbUser, cfg.DbPassword, cfg.DbName, cfg.DbPort, cfg.DbSslMode)
 
 	// Open DB pgsqlConnection
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})

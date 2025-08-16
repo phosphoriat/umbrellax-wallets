@@ -1,4 +1,4 @@
-package database
+package redis
 
 import (
 	"context"
@@ -14,8 +14,8 @@ import (
 // Global Redis connection var
 var redisConnection *redis.Client
 
-// InitRedis Init connection to Redis
-func InitRedis(cfg *config.Config) error {
+// Init connection to Redis
+func Init(cfg *config.Config) error {
 	// Create Redis client
 	client := redis.NewClient(&redis.Options{
 		Addr:     fmt.Sprintf("%s:%s", cfg.RedisHost, cfg.RedisPort),
@@ -48,8 +48,8 @@ func GetRedisConnection() *redis.Client {
 	return redisConnection
 }
 
-// CloseRedis Close Redis connection
-func CloseRedis() error {
+// Close Redis connection
+func Close() error {
 	if redisConnection != nil {
 		return redisConnection.Close()
 	}

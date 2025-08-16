@@ -3,18 +3,28 @@ package routes
 import (
 	"wallets/internal/handlers"
 	"wallets/internal/services"
+	"wallets/internal/services/chains"
 
 	"github.com/gofiber/fiber/v2"
 )
 
 func SetupRoutes(app *fiber.App) {
-	// Set api routes group
-	api := app.Group("/api")
-
+	// Define chain services map (dependency injection)
+	chainServices := map[string]chains.ChainService{
+		"tron":     chains.NewTron(),
+		"ethereum": chains.NewEthereum(),
+		"bsc":      chains.NewEthereum(), // BSC equals Ethereum
+		"ton":      chains.NewTon(),
+		"bitcoin":  chains.NewBitcoin(),
+		"solana":   chains.NewSolana(),
+	}
 	// Init route handlers
 	tokensHandler := handlers.NewTokensHandler(services.NewTokensService())
-	walletsHandler := handlers.NewWalletsHandler(services.NewWalletsService())
-	transactionsHandler := handlers.NewTransactionsHandler(services.NewTransactionsService())
+	walletsHandler := handlers.NewWalletsHandler(services.NewWalletsService(chainServices))
+	transactionsHandler := handlers.NewTransactionsHandler(services.NewTransactionsService(chainServices))
+
+	// Set api routes group
+	api := app.Group("/api")
 
 	// Health check
 	api.Get("/health", func(c *fiber.Ctx) error {
@@ -23,7 +33,7 @@ func SetupRoutes(app *fiber.App) {
 
 	// Tokens routes group
 	tokens := api.Group("/tokens")
-	tokens.Get("/", tokensHandler.GetTokenInfo)
+	tokens.Get("/:ticker", tokensHandler.GetTokenInfo)
 
 	// Wallets routes group
 	wallets := api.Group("/wallets")

@@ -32,8 +32,8 @@ func (s *ActionService) Create(data *models.Action) (*models.Action, error) {
 }
 
 // Update action by id
-func (s *ActionService) Update(id int, data *models.Action) (*models.Action, error) {
-	return s.actionRepo.Update(id, data)
+func (s *ActionService) Update(data *models.Action) (*models.Action, error) {
+	return s.actionRepo.Update(data)
 }
 
 // Delete action by id

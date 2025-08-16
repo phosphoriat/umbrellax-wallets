@@ -18,7 +18,7 @@ type Config struct {
 	DbName     string
 	DbUser     string
 	DbPassword string
-	DbSSLMode  string
+	DbSslMode  string
 	// ClickHouse
 	ClickhouseHost     string
 	ClickhousePort     string
@@ -48,7 +48,7 @@ type Config struct {
 	AmlApiKey    string
 	AmlApiSecret string
 	AmlCheckCost string
-	// RPC
+	// RPC URLs
 	TronRpcUrl string
 	EthRpcUrl  string
 	BscRpcUrl  string
@@ -77,7 +77,7 @@ func Load() *Config {
 		DbName:     getEnv("DB_DATABASE", ""),
 		DbUser:     getEnv("DB_USER", ""),
 		DbPassword: getEnv("DB_PASSWORD", ""),
-		DbSSLMode:  getEnv("DB_SSL_MODE", "required"),
+		DbSslMode:  getEnv("DB_SSL_MODE", "required"),
 		// ClickHouse
 		ClickhouseHost:     getEnv("CLICKHOUSE_HOST", "localhost"),
 		ClickhousePort:     getEnv("CLICKHOUSE_PORT", "8123"),
@@ -107,7 +107,7 @@ func Load() *Config {
 		AmlApiKey:    getEnv("AML_API_KEY", ""),
 		AmlApiSecret: getEnv("AML_API_SECRET", ""),
 		AmlCheckCost: getEnv("AML_CHECK_COST", "0"),
-		// RPC
+		// RPC URLs
 		TronRpcUrl: getEnv("TRON_RPC_URL", ""),
 		EthRpcUrl:  getEnv("ETH_RPC_URL", ""),
 		BscRpcUrl:  getEnv("BSC_RPC_URL", ""),
