@@ -21,7 +21,7 @@ type Tron struct {
 
 // NewTron Create new instance of Tron
 func NewTron() *Tron {
-	// Get Tron RPC from config
+	// Load config
 	cfg := config.Load()
 	// Create client with default options
 	rpcClient := client.NewGrpcClient(cfg.TronRpcUrl)
@@ -58,6 +58,7 @@ func (tron *Tron) GetMasterWallet() (map[string]any, error) {
 
 	wallet := map[string]any{
 		"address": masterData["address"].(string),
+		"balance": 0,
 	}
 
 	return wallet, nil

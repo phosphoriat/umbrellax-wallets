@@ -43,6 +43,11 @@ type Config struct {
 	NatsUser     string
 	NatsPassword string
 	NatsQueue    string
+	// Bybit
+	BybitApiUrl    string
+	BybitWsUrl     string
+	BybitApiKey    string
+	BybitApiSecret string
 	// AML
 	AmlApiUrl    string
 	AmlApiKey    string
@@ -102,6 +107,11 @@ func Load() *Config {
 		NatsUser:     getEnv("NATS_USER", ""),
 		NatsPassword: getEnv("NATS_PASSWORD", ""),
 		NatsQueue:    getEnv("NATS_QUEUE", ""),
+		// Bybit
+		BybitApiUrl:    getEnv("BYBIT_API_URL", ""),
+		BybitWsUrl:     getEnv("BYBIT_WS_URL", ""),
+		BybitApiKey:    getEnv("BYBIT_API_KEY", ""),
+		BybitApiSecret: getEnv("BYBIT_API_SECRET", ""),
 		// AML
 		AmlApiUrl:    getEnv("AML_API_URL", ""),
 		AmlApiKey:    getEnv("AML_API_KEY", ""),

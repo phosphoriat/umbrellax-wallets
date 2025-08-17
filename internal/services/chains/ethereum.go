@@ -1,13 +1,24 @@
 package chains
 
+import (
+	"wallets/internal/config"
+
+	"github.com/fbsobreira/gotron-sdk/pkg/client"
+)
+
 type Ethereum struct {
-	code string
+	code string,
+	rpcClient *client.GrpcClient
 }
 
 // NewEthereum Create new instance of Ethereum
 func NewEthereum() *Ethereum {
+	// Load config
+	cfg := config.Load()
+
 	return &Ethereum{
 		code: "ethereum",
+		rpcClient: rpcClient,
 	}
 }
 

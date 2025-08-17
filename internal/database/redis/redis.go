@@ -53,12 +53,11 @@ func Close() error {
 	if redisConnection != nil {
 		return redisConnection.Close()
 	}
-
 	return nil
 }
 
-// SetValue Set value in Redis with expiration
-func SetValue(key string, value interface{}, expiration time.Duration) error {
+// Set string value in Redis with expiration
+func Set(key string, value interface{}, expiration time.Duration) error {
 	if redisConnection == nil {
 		return fmt.Errorf("redis connection not initialized")
 	}
@@ -67,8 +66,8 @@ func SetValue(key string, value interface{}, expiration time.Duration) error {
 	return redisConnection.Set(ctx, key, value, expiration).Err()
 }
 
-// GetValue Get value from Redis
-func GetValue(key string) (string, error) {
+// Get string value from Redis
+func Get(key string) (string, error) {
 	if redisConnection == nil {
 		return "", fmt.Errorf("redis connection not initialized")
 	}
@@ -77,8 +76,8 @@ func GetValue(key string) (string, error) {
 	return redisConnection.Get(ctx, key).Result()
 }
 
-// DeleteValue Delete value from Redis
-func DeleteValue(key string) error {
+// Del string value from Redis
+func Del(key string) error {
 	if redisConnection == nil {
 		return fmt.Errorf("redis connection not initialized")
 	}
@@ -87,8 +86,8 @@ func DeleteValue(key string) error {
 	return redisConnection.Del(ctx, key).Err()
 }
 
-// SetHash Set hash field value
-func SetHash(key, field string, value interface{}) error {
+// HSet Set hash field value
+func HSet(key, field string, value interface{}) error {
 	if redisConnection == nil {
 		return fmt.Errorf("redis connection not initialized")
 	}
@@ -97,8 +96,8 @@ func SetHash(key, field string, value interface{}) error {
 	return redisConnection.HSet(ctx, key, field, value).Err()
 }
 
-// GetHash Get hash field value
-func GetHash(key, field string) (string, error) {
+// HGet Get hash field value
+func HGet(key, field string) (string, error) {
 	if redisConnection == nil {
 		return "", fmt.Errorf("redis connection not initialized")
 	}
@@ -107,8 +106,8 @@ func GetHash(key, field string) (string, error) {
 	return redisConnection.HGet(ctx, key, field).Result()
 }
 
-// GetAllHash Get all hash fields and values
-func GetAllHash(key string) (map[string]string, error) {
+// HGetAll Get all hash fields and values
+func HGetAll(key string) (map[string]string, error) {
 	if redisConnection == nil {
 		return nil, fmt.Errorf("redis connection not initialized")
 	}
@@ -117,8 +116,8 @@ func GetAllHash(key string) (map[string]string, error) {
 	return redisConnection.HGetAll(ctx, key).Result()
 }
 
-// PushToList Push value to list (left push)
-func PushToList(key string, values ...interface{}) error {
+// LPush Push value to list (left push)
+func LPush(key string, values ...interface{}) error {
 	if redisConnection == nil {
 		return fmt.Errorf("redis connection not initialized")
 	}
@@ -127,8 +126,8 @@ func PushToList(key string, values ...interface{}) error {
 	return redisConnection.LPush(ctx, key, values...).Err()
 }
 
-// PopFromList Pop value from list (right pop)
-func PopFromList(key string) (string, error) {
+// RPop Pop value from list (right pop)
+func RPop(key string) (string, error) {
 	if redisConnection == nil {
 		return "", fmt.Errorf("redis connection not initialized")
 	}
@@ -137,8 +136,8 @@ func PopFromList(key string) (string, error) {
 	return redisConnection.RPop(ctx, key).Result()
 }
 
-// GetListLength Get list length
-func GetListLength(key string) (int64, error) {
+// LLen Get list length
+func LLen(key string) (int64, error) {
 	if redisConnection == nil {
 		return 0, fmt.Errorf("redis connection not initialized")
 	}
@@ -147,8 +146,8 @@ func GetListLength(key string) (int64, error) {
 	return redisConnection.LLen(ctx, key).Result()
 }
 
-// AddToSet Add value to set
-func AddToSet(key string, values ...interface{}) error {
+// SAdd Add value to set
+func SAdd(key string, values ...interface{}) error {
 	if redisConnection == nil {
 		return fmt.Errorf("redis connection not initialized")
 	}
@@ -157,8 +156,8 @@ func AddToSet(key string, values ...interface{}) error {
 	return redisConnection.SAdd(ctx, key, values...).Err()
 }
 
-// IsInSet Check if value is in set
-func IsInSet(key string, value interface{}) (bool, error) {
+// SIsMember Check if value is in set
+func SIsMember(key string, value interface{}) (bool, error) {
 	if redisConnection == nil {
 		return false, fmt.Errorf("redis connection not initialized")
 	}
@@ -167,8 +166,8 @@ func IsInSet(key string, value interface{}) (bool, error) {
 	return redisConnection.SIsMember(ctx, key, value).Result()
 }
 
-// GetSetMembers Get all set members
-func GetSetMembers(key string) ([]string, error) {
+// SMembers Get all set members
+func SMembers(key string) ([]string, error) {
 	if redisConnection == nil {
 		return nil, fmt.Errorf("redis connection not initialized")
 	}

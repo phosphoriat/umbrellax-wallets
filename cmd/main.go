@@ -12,6 +12,7 @@ import (
 	"wallets/internal/config"
 	"wallets/internal/database"
 	"wallets/internal/routes"
+	"wallets/internal/services/api/bybit"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/logger"
@@ -29,6 +30,10 @@ func main() {
 	if err := database.InitDB(cfg); err != nil {
 		log.Fatal("Failed to initialize connection:", err)
 	}
+
+	/* Init services */
+	// Init Bybit websocket wallet stream
+	bybit.InitWalletStream(cfg)
 
 	// Create app instance
 	app := fiber.New(fiber.Config{
