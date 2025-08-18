@@ -12,7 +12,7 @@ import (
 // Ethereum RPC connection struct
 type Ethereum struct {
 	BaseChainService
-	rpcClient *ethclient.Client
+	Client *ethclient.Client
 }
 
 // Global package vars
@@ -33,15 +33,16 @@ func GetEthereum() *Ethereum {
 func newEthereum() *Ethereum {
 	// Load config
 	cfg := config.Load()
-	// Create RPC client with default options
-	rpcClient, err := ethclient.Dial(cfg.EthRpcUrl)
+
+	// Create RPC client
+	ethClient, err := ethclient.Dial(cfg.EthRpcUrl)
 	if err != nil {
 		log.Printf("failed to connect Ethereum RPC API: %v", err)
 	}
 
 	return &Ethereum{
 		BaseChainService: BaseChainService{Code: "ethereum"},
-		rpcClient:        rpcClient,
+		Client:           ethClient,
 	}
 }
 

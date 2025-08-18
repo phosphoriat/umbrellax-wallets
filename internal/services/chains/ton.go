@@ -1,15 +1,15 @@
 package chains
 
 import (
-	"log"
 	"sync"
 
-	"wallets/internal/config"
+	"github.com/xssnick/tonutils-go/liteclient"
+	"github.com/xssnick/tonutils-go/ton"
 )
 
 type Ton struct {
 	BaseChainService
-	rpcClient *rpc.RpcClient
+	Client ton.APIClientWrapped
 }
 
 // Global package vars
@@ -28,17 +28,12 @@ func GetTon() *Ton {
 
 // @private newTon Create new instance of Ton (private constructor)
 func newTon() *Ton {
-	// Load config
-	cfg := config.Load()
-	// Create RPC client with default options
-	rpcClient, err :=
-	if err != nil {
-		log.Printf("failed to connect Ton RPC API: %v", err)
-	}
+	// Create Ton ADNL API client
+	apiClient := ton.NewAPIClient(liteclient.NewConnectionPool()).WithRetry()
 
 	return &Ton{
 		BaseChainService: BaseChainService{Code: "ton"},
-		rpcClient:        rpcClient,
+		Client:           apiClient,
 	}
 }
 

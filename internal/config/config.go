@@ -56,14 +56,14 @@ type Config struct {
 	AmlApiKey    string
 	AmlApiSecret string
 	AmlCheckCost string
-	// RPC URLs
+	// RPC urls
 	TronRpcUrl string
 	EthRpcUrl  string
-	BscRpcUrl  string
-	TonRpcUrl  string
+	BscRrcUrl  string
 	BtcRpcUrl  string
 	SolRpcUrl  string
 	// Tatum
+	TatumApiKey  string
 	TatumWebhook string
 }
 
@@ -123,14 +123,14 @@ func Load() *Config {
 		AmlApiKey:    getEnv("AML_API_KEY", ""),
 		AmlApiSecret: getEnv("AML_API_SECRET", ""),
 		AmlCheckCost: getEnv("AML_CHECK_COST", "0"),
-		// RPC URLs
+		// RPC urls
 		TronRpcUrl: getEnv("TRON_RPC_URL", ""),
 		EthRpcUrl:  getEnv("ETH_RPC_URL", ""),
-		BscRpcUrl:  getEnv("BSC_RPC_URL", ""),
-		TonRpcUrl:  getEnv("TON_RPC_URL", ""),
+		BscRrcUrl:  getEnv("BSC_RRC_URL", ""),
 		BtcRpcUrl:  getEnv("BTC_RPC_URL", ""),
 		SolRpcUrl:  getEnv("SOL_RPC_URL", ""),
 		// Tatum
+		TatumApiKey:  getEnv("TATUM_API_KEY", ""),
 		TatumWebhook: getEnv("TATUM_WEBHOOK", ""),
 	}
 }

@@ -5,11 +5,13 @@ import (
 	"sync"
 
 	"wallets/internal/config"
+
+	"github.com/btcsuite/btcd/rpcclient"
 )
 
 type Bitcoin struct {
 	BaseChainService
-	rpcClient *rpc.RpcClient
+	Client *rpcclient.Client
 }
 
 // Global package vars
@@ -30,15 +32,24 @@ func GetBitcoin() *Bitcoin {
 func newBitcoin() *Bitcoin {
 	// Load config
 	cfg := config.Load()
+
 	// Create RPC client with default options
-	rpcClient, err :=
+	client, err := rpcclient.New(&rpcclient.ConnConfig{
+		Host:         cfg.BtcRpcUrl,
+		HTTPPostMode: true,
+		DisableTLS:   false,
+		ExtraHeaders: map[string]string{
+			"x-api-key":    cfg.TatumApiKey,
+			"Content-Type": "application/json",
+		},
+	}, nil)
 	if err != nil {
 		log.Printf("failed to connect Bitcoin RPC API: %v", err)
 	}
 
 	return &Bitcoin{
 		BaseChainService: BaseChainService{Code: "bitcoin"},
-		rpcClient:        rpcClient,
+		Client:           client,
 	}
 }
 

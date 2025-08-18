@@ -1,15 +1,16 @@
 package chains
 
 import (
-	"log"
 	"sync"
 
 	"wallets/internal/config"
+
+	"github.com/gagliardetto/solana-go/rpc"
 )
 
 type Solana struct {
 	BaseChainService
-	rpcClient *rpc.RpcClient
+	rpcClient *rpc.Client
 }
 
 // Global package vars
@@ -30,15 +31,13 @@ func GetSolana() *Solana {
 func newSolana() *Solana {
 	// Load config
 	cfg := config.Load()
-	// Create RPC client with default options
-	rpcClient, err :=
-	if err != nil {
-		log.Printf("failed to connect Solana RPC API: %v", err)
-	}
+
+	// Create RPC client
+	client := rpc.New(cfg.SolRpcUrl)
 
 	return &Solana{
 		BaseChainService: BaseChainService{Code: "solana"},
-		rpcClient:        rpcClient,
+		rpcClient:        client,
 	}
 }
 

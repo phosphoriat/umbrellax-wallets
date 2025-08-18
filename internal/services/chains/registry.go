@@ -52,6 +52,7 @@ func GetAvailableNetworks() []string {
 func init() {
 	RegisterChainService("tron", func() ChainService { return GetTron() })
 	RegisterChainService("ethereum", func() ChainService { return GetEthereum() })
+	RegisterChainService("bsc", func() ChainService { return GetBsc() })
 	RegisterChainService("ton", func() ChainService { return GetTon() })
 	RegisterChainService("bitcoin", func() ChainService { return GetBitcoin() })
 	RegisterChainService("solana", func() ChainService { return GetSolana() })

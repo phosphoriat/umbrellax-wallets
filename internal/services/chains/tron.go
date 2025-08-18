@@ -19,7 +19,7 @@ import (
 // Tron RPC connection struct
 type Tron struct {
 	BaseChainService
-	rpcClient *client.GrpcClient
+	Client *client.GrpcClient
 }
 
 // Global package vars
@@ -40,10 +40,9 @@ func GetTron() *Tron {
 func newTron() *Tron {
 	// Load config
 	cfg := config.Load()
-	// Create RPC client with default options
-	rpcClient := client.NewGrpcClient(cfg.TronRpcUrl)
 
-	// Start the connection to the RPC
+	// Create RPC client
+	rpcClient := client.NewGrpcClient(cfg.TronRpcUrl)
 	err := rpcClient.Start(client.GRPCInsecure())
 	if err != nil {
 		log.Printf("failed to connect Tron RPC API: %v", err)
@@ -51,7 +50,7 @@ func newTron() *Tron {
 
 	return &Tron{
 		BaseChainService: BaseChainService{Code: "tron"},
-		rpcClient:        rpcClient,
+		Client:           rpcClient,
 	}
 }
 
@@ -92,7 +91,7 @@ func (tron *Tron) GetTransactionCommission(currency string, to string, amount fl
 
 // GetTransactionStatus Get transaction status by hash
 func (tron *Tron) GetTransactionStatus(hash string) (string, error) {
-	tx, err := tron.rpcClient.GetTransactionByID(hash)
+	tx, err := tron.Client.GetTransactionByID(hash)
 	if err != nil {
 		return "", fmt.Errorf("failed to get transaction: %w", err)
 	}
@@ -104,7 +103,7 @@ func (tron *Tron) GetTransactionStatus(hash string) (string, error) {
 
 // SendTransaction Send transaction to the network
 func (tron *Tron) SendTransaction(currency string, to string, amount float64) (map[string]any, error) {
-	
+
 	// @TODO AML Check transaction
 	amlId, err := aml.GetClient().CheckTransaction()
 	if err != nil {
