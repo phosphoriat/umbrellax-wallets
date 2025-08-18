@@ -1,14 +1,50 @@
 package chains
 
+import (
+	"log"
+	"sync"
+
+	"wallets/internal/config"
+)
+
 type Solana struct {
-	code string
+	BaseChainService
+	rpcClient *rpc.RpcClient
 }
 
-// NewSolana Create new instance of Solana
-func NewSolana() *Solana {
-	return &Solana{
-		code: "solana",
+// Global package vars
+var (
+	solanaInstance *Solana
+	solanaOnce     sync.Once
+)
+
+// GetSolana Get Solana chain instance
+func GetSolana() *Solana {
+	solanaOnce.Do(func() {
+		solanaInstance = newSolana()
+	})
+	return solanaInstance
+}
+
+// @private newSolana Create new instance of Solana (private constructor)
+func newSolana() *Solana {
+	// Load config
+	cfg := config.Load()
+	// Create RPC client with default options
+	rpcClient, err :=
+	if err != nil {
+		log.Printf("failed to connect Solana RPC API: %v", err)
 	}
+
+	return &Solana{
+		BaseChainService: BaseChainService{Code: "solana"},
+		rpcClient:        rpcClient,
+	}
+}
+
+// GetCode Get network code
+func (sol *Solana) GetCode() string {
+	return sol.Code
 }
 
 // GetUserWallet Get user HD-wallet by user id and prefix
@@ -32,7 +68,7 @@ func (sol *Solana) GetTransactionStatus(hash string) (string, error) {
 }
 
 // SendTransaction Send transaction to the network
-func (sol *Solana) SendTransaction(currency string, to string, amount float64, comment *string) (map[string]any, error) {
+func (sol *Solana) SendTransaction(currency string, to string, amount float64) (map[string]any, error) {
 
 }
 

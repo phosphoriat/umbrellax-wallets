@@ -1,14 +1,50 @@
 package chains
 
+import (
+	"log"
+	"sync"
+
+	"wallets/internal/config"
+)
+
 type Bitcoin struct {
-	code string
+	BaseChainService
+	rpcClient *rpc.RpcClient
 }
 
-// NewBitcoin Create new instance of Tron
-func NewBitcoin() *Bitcoin {
-	return &Bitcoin{
-		code: "bitcoin",
+// Global package vars
+var (
+	btcInstance *Bitcoin
+	btcOnce     sync.Once
+)
+
+// GetBitcoin Get Bitcoin chain instance
+func GetBitcoin() *Bitcoin {
+	btcOnce.Do(func() {
+		btcInstance = newBitcoin()
+	})
+	return btcInstance
+}
+
+// @private newBitcoin Create new instance of Tron (private constructor)
+func newBitcoin() *Bitcoin {
+	// Load config
+	cfg := config.Load()
+	// Create RPC client with default options
+	rpcClient, err :=
+	if err != nil {
+		log.Printf("failed to connect Bitcoin RPC API: %v", err)
 	}
+
+	return &Bitcoin{
+		BaseChainService: BaseChainService{Code: "bitcoin"},
+		rpcClient:        rpcClient,
+	}
+}
+
+// GetCode Get network code
+func (btc *Bitcoin) GetCode() string {
+	return btc.Code
 }
 
 // GetUserWallet Get user HD-wallet by user id and prefix
@@ -32,7 +68,7 @@ func (btc *Bitcoin) GetTransactionStatus(hash string) (string, error) {
 }
 
 // SendTransaction Send transaction to the network
-func (btc *Bitcoin) SendTransaction(currency string, to string, amount float64, comment *string) (map[string]any, error) {
+func (btc *Bitcoin) SendTransaction(currency string, to string, amount float64) (map[string]any, error) {
 
 }
 

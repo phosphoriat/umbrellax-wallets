@@ -11,20 +11,44 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
 	"wallets/internal/config"
 )
 
 // Client Bitok HTTP client struct
 type Client struct {
-	config     *config.Config
+	apiUrl     string
+	apiKey     string
+	apiSecret  string
 	httpClient *http.Client
+	mu         sync.RWMutex
 }
 
-// NewAmlClient Create new Client instance
-func NewAmlClient(config *config.Config) *Client {
+// Global package vars
+var (
+	clientInstance *Client
+	once           sync.Once
+)
+
+// GetClient Get global Bitok Client instance
+func GetClient() *Client {
+	once.Do(func() {
+		clientInstance = newBitokClient()
+	})
+	return clientInstance
+}
+
+// @private newBitokClient Create new Client instance (private constructor)
+func newBitokClient() *Client {
+	// Load config
+	cfg := config.Load()
+
 	return &Client{
-		config: config,
+		apiUrl:    cfg.AmlApiUrl,
+		apiKey:    cfg.AmlApiKey,
+		apiSecret: cfg.AmlApiSecret,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
@@ -32,7 +56,7 @@ func NewAmlClient(config *config.Config) *Client {
 }
 
 // CheckAddress Manual check address
-func (client *Client) CheckAddress(network, tokenId, address string) (map[string]interface{}, error) {
+func (c *Client) CheckAddress(network, currency, address string) (map[string]interface{}, error) {
 	timestamp := time.Now().UnixMilli()
 	endpoint := "/v1/manual-checks/check-address/"
 
@@ -45,19 +69,19 @@ func (client *Client) CheckAddress(network, tokenId, address string) (map[string
 		return nil, fmt.Errorf("JSON serialize error: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", client.config.AmlApiUrl+endpoint, bytes.NewReader(payload))
+	req, err := http.NewRequest("POST", c.apiUrl+endpoint, bytes.NewReader(payload))
 	if err != nil {
 		return nil, fmt.Errorf("request create error: %w", err)
 	}
 
-	signature := client.getHMAC("POST", endpoint, timestamp, string(payload))
-	client.setHeaders(req, timestamp, signature)
+	signature := c.getHMAC("POST", endpoint, timestamp, string(payload))
+	c.setHeaders(req, timestamp, signature)
 
-	return client.executeRequest(req)
+	return c.executeRequest(req)
 }
 
 // CheckTransaction Manual check transaction
-func (client *Client) CheckTransaction(network, tokenId, hash, toAddress, direction string) (map[string]interface{}, error) {
+func (c *Client) CheckTransaction(network, currency, hash, toAddress string) (map[string]interface{}, error) {
 	timestamp := time.Now().UnixMilli()
 	endpoint := "/v1/manual-checks/check-transfer/"
 
@@ -66,26 +90,26 @@ func (client *Client) CheckTransaction(network, tokenId, hash, toAddress, direct
 		"token_id":       tokenId,
 		"tx_hash":        hash,
 		"output_address": toAddress,
-		"direction":      direction,
+		"direction":      "outcoming",
 	})
 	if err != nil {
 		return nil, fmt.Errorf("JSON serialize error: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", client.config.AmlApiUrl+endpoint, bytes.NewReader(payload))
+	req, err := http.NewRequest("POST", c.apiUrl+endpoint, bytes.NewReader(payload))
 	if err != nil {
 		return nil, fmt.Errorf("request create error: %w", err)
 	}
 
-	signature := client.getHMAC("POST", endpoint, timestamp, string(payload))
-	client.setHeaders(req, timestamp, signature)
+	signature := c.getHMAC("POST", endpoint, timestamp, string(payload))
+	c.setHeaders(req, timestamp, signature)
 
-	return client.executeRequest(req)
+	return c.executeRequest(req)
 }
 
 // @private executeRequest Execute HTTP request and parse response
-func (client *Client) executeRequest(req *http.Request) (map[string]interface{}, error) {
-	resp, err := client.httpClient.Do(req)
+func (c *Client) executeRequest(req *http.Request) (map[string]interface{}, error) {
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("API request error: %w", err)
 	}
@@ -109,25 +133,25 @@ func (client *Client) executeRequest(req *http.Request) (map[string]interface{},
 	return result, nil
 }
 
+// @private setHeaders Set request headers
+func (c *Client) setHeaders(req *http.Request, timestamp int64, signature string) {
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("API-KEY-ID", c.apiKey)
+	req.Header.Set("API-TIMESTAMP", strconv.FormatInt(timestamp, 10))
+	req.Header.Set("API-SIGNATURE", signature)
+}
+
 // @private getHMAC Generate HMAC signature
-func (client *Client) getHMAC(method, endpoint string, timestamp int64, jsonPayload string) string {
+func (c *Client) getHMAC(method, endpoint string, timestamp int64, jsonPayload string) string {
 	strToSign := fmt.Sprintf("%s\n%s\n%d", strings.ToUpper(method), endpoint, timestamp)
 	if jsonPayload != "" {
 		strToSign += "\n" + jsonPayload
 	}
 
-	h := hmac.New(sha256.New, []byte(client.config.AmlApiSecret))
+	h := hmac.New(sha256.New, []byte(c.apiSecret))
 	h.Write([]byte(strToSign))
 	signature := h.Sum(nil)
 
 	return base64.StdEncoding.EncodeToString(signature)
-}
-
-// @private setHeaders Set request headers
-func (client *Client) setHeaders(req *http.Request, timestamp int64, signature string) {
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("API-KEY-ID", client.config.AmlApiKey)
-	req.Header.Set("API-TIMESTAMP", strconv.FormatInt(timestamp, 10))
-	req.Header.Set("API-SIGNATURE", signature)
 }

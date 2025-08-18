@@ -1,27 +1,22 @@
 package services
 
 import (
-	"fmt"
 	"wallets/internal/services/chains"
 )
 
-type TransactionsService struct {
-	chains map[string]chains.ChainService
-}
+type TransactionsService struct{}
 
 // NewTransactionsService Create new instance of TransactionsService
-func NewTransactionsService(chains map[string]chains.ChainService) *TransactionsService {
-	return &TransactionsService{chains}
+func NewTransactionsService() *TransactionsService {
+	return &TransactionsService{}
 }
 
 // GetTransactionCommission Calc transaction commission
-func (service *TransactionsService) GetTransactionCommission(
-	network string, currency string, to string, amount float64,
-) (map[string]any, error) {
-	// Get chain instance from injected dependencies
-	chainService, exists := service.chains[network]
-	if !exists {
-		return nil, fmt.Errorf("unsupported network: %s", network)
+func (s *TransactionsService) GetTransactionCommission(network, currency, to string, amount float64) (map[string]any, error) {
+	// Get chain service instance from registry
+	chainService, err := chains.GetChainService(network)
+	if err != nil {
+		return nil, err
 	}
 
 	commission, err := chainService.GetTransactionCommission(currency, to, amount)
@@ -35,11 +30,11 @@ func (service *TransactionsService) GetTransactionCommission(
 }
 
 // GetTransactionStatus Get transaction status by hash
-func (service *TransactionsService) GetTransactionStatus(network string, hash string) (map[string]string, error) {
-	// Get chain instance from injected dependencies
-	chainService, exists := service.chains[network]
-	if !exists {
-		return nil, fmt.Errorf("unsupported network: %s", network)
+func (s *TransactionsService) GetTransactionStatus(network, hash string) (map[string]any, error) {
+	// Get chain service instance from registry
+	chainService, err := chains.GetChainService(network)
+	if err != nil {
+		return nil, err
 	}
 
 	status, err := chainService.GetTransactionStatus(hash)
@@ -47,27 +42,23 @@ func (service *TransactionsService) GetTransactionStatus(network string, hash st
 		return nil, err
 	}
 
-	return map[string]string{
+	return map[string]any{
 		"status": status,
 	}, nil
 }
 
-// SendTransaction Send new transaction to the network and return hash
-func (service *TransactionsService) SendTransaction(
-	network string, currency string, to string, amount float64, comment *string,
-) (map[string]any, error) {
-	// Get chain instance from injected dependencies
-	chainService, exists := service.chains[network]
-	if !exists {
-		return nil, fmt.Errorf("unsupported network: %s", network)
-	}
-
-	transaction, err := chainService.SendTransaction(currency, to, amount, comment)
+// SendWithdrawal Send new withdraw to the queue and return queue_id
+func (s *TransactionsService) SendWithdrawal(network, currency, to string, amount float64) (map[string]any, error) {
+	// Get chain service instance from registry
+	_, err := chains.GetChainService(network)
 	if err != nil {
 		return nil, err
 	}
 
-	return map[string]any{
-		"transaction": transaction,
-	}, nil
+	res, err := chains.CreateBybitWithdrawRequest(currency, network, to, amount)
+	if err != nil {
+		return nil, err
+	}
+
+	return res, nil
 }

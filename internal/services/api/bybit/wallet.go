@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
 	"wallets/internal/config"
 
 	"github.com/gorilla/websocket"
@@ -36,7 +37,7 @@ type WalletResponse struct {
 	Data         []WalletData `json:"data"`
 }
 
-// WalletData struct
+// WalletData data struct
 type WalletData struct {
 	AccountType            string     `json:"accountType"`
 	AccountIMRate          string     `json:"accountIMRate"`
@@ -51,7 +52,7 @@ type WalletData struct {
 	Coin                   []CoinInfo `json:"coin"`
 }
 
-// CoinInfo struct
+// CoinInfo data struct
 type CoinInfo struct {
 	Coin                string `json:"coin"`
 	Equity              string `json:"equity"`
@@ -68,7 +69,7 @@ type CoinInfo struct {
 	MarginCollateral    bool   `json:"marginCollateral"`
 }
 
-// WSClient WebSocket Bybit client struct
+// WSClient WebSocket client struct
 type WSClient struct {
 	config     *config.Config
 	conn       *websocket.Conn
@@ -83,7 +84,7 @@ func NewWSClient(config *config.Config) *WSClient {
 	return &WSClient{
 		config:     config,
 		stopChan:   make(chan struct{}),
-		httpClient: NewHTTPClient(config),
+		httpClient: GetHTTPClient(),
 	}
 }
 
@@ -156,6 +157,33 @@ func (ws *WSClient) Close() error {
 	return nil
 }
 
+// @private pingHandler Send ping messages to maintain the connection
+func (ws *WSClient) pingHandler() {
+	ticker := time.NewTicker(20 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ws.stopChan:
+			return
+
+		case <-ticker.C:
+			ws.mu.RLock()
+			conn := ws.conn
+			ws.mu.RUnlock()
+
+			if conn == nil {
+				return
+			}
+
+			pingMsg := map[string]string{"op": "ping"}
+			if err := ws.sendMessage(pingMsg); err != nil {
+				log.Printf("Ping sending error: %v", err)
+			}
+		}
+	}
+}
+
 // @private generateSignature Generate signature for auth
 func (ws *WSClient) generateSignature(expires int64) string {
 	h := hmac.New(sha256.New, []byte(ws.config.BybitApiSecret))
@@ -208,7 +236,7 @@ func (ws *WSClient) sendMessage(msg interface{}) error {
 	return ws.conn.WriteMessage(websocket.TextMessage, data)
 }
 
-// @private messageHandler Incoming messages handler
+// @private messageHandler Incoming messages handler (in a separate goroutines)
 func (ws *WSClient) messageHandler() {
 	defer func() {
 		if r := recover(); r != nil {
@@ -220,6 +248,7 @@ func (ws *WSClient) messageHandler() {
 		select {
 		case <-ws.stopChan:
 			return
+
 		default:
 			ws.mu.RLock()
 			conn := ws.conn
@@ -286,7 +315,7 @@ func (ws *WSClient) processMessage(message []byte) {
 }
 
 // @private handleWalletData Handle wallet data
-// Transfer funds from FUND to UNIFIED account
+// Transfer funds from UNIFIED to FUND account
 func (ws *WSClient) handleWalletData(message []byte) {
 	var walletResp WalletResponse
 	if err := json.Unmarshal(message, &walletResp); err != nil {
@@ -295,45 +324,17 @@ func (ws *WSClient) handleWalletData(message []byte) {
 
 	for _, data := range walletResp.Data {
 		for _, coin := range data.Coin {
-			if data.AccountType != "FUND" {
+			if data.AccountType != "UNIFIED" {
 				continue
 			}
 
-			_, err := ws.httpClient.CreateInternalTransfer(coin.Coin, coin.Equity, "FUND", "UNIFIED")
-
+			_, err := ws.httpClient.CreateInternalTransfer(coin.Coin, coin.Free, "UNIFIED", "FUND")
 			if err != nil {
-				fmt.Printf("Error transferring %f %s from FUND to UNIFIED: %v\n",
+				fmt.Printf("Error transferring %s %s from UNIFIED to FUND: %v\n",
 					coin.Equity, coin.Coin, err)
 			} else {
-				fmt.Printf("Successfully transferred %f %s from FUND to UNIFIED\n",
+				fmt.Printf("Successfully transferred %s %s from UNIFIED to FUND\n",
 					coin.Equity, coin.Coin)
-			}
-		}
-	}
-}
-
-// @private pingHandler Send ping messages to maintain the connection
-func (ws *WSClient) pingHandler() {
-	ticker := time.NewTicker(20 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ws.stopChan:
-			return
-
-		case <-ticker.C:
-			ws.mu.RLock()
-			conn := ws.conn
-			ws.mu.RUnlock()
-
-			if conn == nil {
-				return
-			}
-
-			pingMsg := map[string]string{"op": "ping"}
-			if err := ws.sendMessage(pingMsg); err != nil {
-				log.Printf("Ping sending error: %v", err)
 			}
 		}
 	}

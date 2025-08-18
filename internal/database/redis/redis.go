@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"wallets/internal/config"
@@ -11,11 +12,42 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// Global Redis connection var
-var redisConnection *redis.Client
+// Client Redis connection struct
+type Client struct {
+	redis *redis.Client
+	mu    sync.RWMutex
+}
 
-// Init connection to Redis
+// Global package vars
+var (
+	clientInstance *Client
+	once           sync.Once
+)
+
+// GetClient Get global Redis Client instance
+func GetClient() *Client {
+	return clientInstance
+}
+
+// Init Redis connection (singleton)
 func Init(cfg *config.Config) error {
+	var err error
+	once.Do(func() {
+		clientInstance, err = newRedisClient(cfg)
+	})
+	return err
+}
+
+// Close global Redis connection
+func Close() error {
+	if clientInstance == nil {
+		return nil
+	}
+	return clientInstance.closeConnection()
+}
+
+// @private newRedisClient Create new Redis Client instance (private constructor)
+func newRedisClient(cfg *config.Config) (*Client, error) {
 	// Create Redis client
 	client := redis.NewClient(&redis.Options{
 		Addr:     fmt.Sprintf("%s:%s", cfg.RedisHost, cfg.RedisPort),
@@ -29,149 +61,343 @@ func Init(cfg *config.Config) error {
 
 	pong, err := client.Ping(ctx).Result()
 	if err != nil {
-		return fmt.Errorf("failed to ping Redis: %w", err)
+		client.Close()
+		return nil, fmt.Errorf("failed to ping Redis: %w", err)
 	}
 	if pong != "PONG" {
-		return fmt.Errorf("unexpected ping response from Redis: %s", pong)
+		client.Close()
+		return nil, fmt.Errorf("unexpected ping response from Redis: %s", pong)
 	}
 
-	// Assign connection to global var
-	redisConnection = client
 	log.Printf("Redis connection established: %s:%s (DB: %d)",
 		cfg.RedisHost, cfg.RedisPort, cfg.RedisDatabase)
 
+	return &Client{
+		redis: client,
+	}, nil
+}
+
+// @private getClient Get Redis connection instance
+func (c *Client) getClient() (*redis.Client, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if c.redis == nil {
+		return nil, fmt.Errorf("redis client is not initialized")
+	}
+
+	return c.redis, nil
+}
+
+// @private closeConnection Close Redis connection
+func (c *Client) closeConnection() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.redis != nil {
+		err := c.redis.Close()
+		c.redis = nil
+		return err
+	}
+
 	return nil
 }
 
-// GetRedisConnection Return Redis connection instance
-func GetRedisConnection() *redis.Client {
-	return redisConnection
-}
-
-// Close Redis connection
-func Close() error {
-	if redisConnection != nil {
-		return redisConnection.Close()
-	}
-	return nil
-}
-
-// Set string value in Redis with expiration
-func Set(key string, value interface{}, expiration time.Duration) error {
-	if redisConnection == nil {
-		return fmt.Errorf("redis connection not initialized")
+// Set string key value with TTL
+func (c *Client) Set(ctx context.Context, key string, value interface{}, expiration time.Duration) error {
+	client, err := c.getClient()
+	if err != nil {
+		return err
 	}
 
-	ctx := context.Background()
-	return redisConnection.Set(ctx, key, value, expiration).Err()
+	return client.Set(ctx, key, value, expiration).Err()
 }
 
-// Get string value from Redis
-func Get(key string) (string, error) {
-	if redisConnection == nil {
-		return "", fmt.Errorf("redis connection not initialized")
+// Get string key value from Redis
+func (c *Client) Get(ctx context.Context, key string) (string, error) {
+	client, err := c.getClient()
+	if err != nil {
+		return "", err
 	}
 
-	ctx := context.Background()
-	return redisConnection.Get(ctx, key).Result()
+	return client.Get(ctx, key).Result()
 }
 
-// Del string value from Redis
-func Del(key string) error {
-	if redisConnection == nil {
-		return fmt.Errorf("redis connection not initialized")
+// GetWithExpiration Get key value with TTL
+func (c *Client) GetWithExpiration(ctx context.Context, key string) (string, time.Duration, error) {
+	client, err := c.getClient()
+	if err != nil {
+		return "", 0, err
 	}
 
-	ctx := context.Background()
-	return redisConnection.Del(ctx, key).Err()
+	pipe := client.Pipeline()
+	getCmd := pipe.Get(ctx, key)
+	ttlCmd := pipe.TTL(ctx, key)
+
+	_, err = pipe.Exec(ctx)
+	if err != nil {
+		return "", 0, err
+	}
+
+	value, err := getCmd.Result()
+	if err != nil {
+		return "", 0, err
+	}
+
+	ttl, err := ttlCmd.Result()
+	if err != nil {
+		return value, 0, err
+	}
+
+	return value, ttl, nil
+}
+
+// Del Delete key from Redis
+func (c *Client) Del(ctx context.Context, keys ...string) error {
+	client, err := c.getClient()
+	if err != nil {
+		return err
+	}
+
+	return client.Del(ctx, keys...).Err()
+}
+
+// Exists Check if key exists
+func (c *Client) Exists(ctx context.Context, keys ...string) (int64, error) {
+	client, err := c.getClient()
+	if err != nil {
+		return 0, err
+	}
+
+	return client.Exists(ctx, keys...).Result()
+}
+
+// Expire Set key expire time (TTL)
+func (c *Client) Expire(ctx context.Context, key string, expiration time.Duration) error {
+	client, err := c.getClient()
+	if err != nil {
+		return err
+	}
+
+	return client.Expire(ctx, key, expiration).Err()
+}
+
+// TTL Get key expire time (TTL)
+func (c *Client) TTL(ctx context.Context, key string) (time.Duration, error) {
+	client, err := c.getClient()
+	if err != nil {
+		return 0, err
+	}
+
+	return client.TTL(ctx, key).Result()
 }
 
 // HSet Set hash field value
-func HSet(key, field string, value interface{}) error {
-	if redisConnection == nil {
-		return fmt.Errorf("redis connection not initialized")
+func (c *Client) HSet(ctx context.Context, key, field string, value interface{}) error {
+	client, err := c.getClient()
+	if err != nil {
+		return err
 	}
 
-	ctx := context.Background()
-	return redisConnection.HSet(ctx, key, field, value).Err()
+	return client.HSet(ctx, key, field, value).Err()
 }
 
-// HGet Get hash field value
-func HGet(key, field string) (string, error) {
-	if redisConnection == nil {
-		return "", fmt.Errorf("redis connection not initialized")
+// HMSet Set hash multiple field values
+func (c *Client) HMSet(ctx context.Context, key string, values map[string]interface{}) error {
+	client, err := c.getClient()
+	if err != nil {
+		return err
 	}
 
-	ctx := context.Background()
-	return redisConnection.HGet(ctx, key, field).Result()
+	return client.HMSet(ctx, key, values).Err()
 }
 
-// HGetAll Get all hash fields and values
-func HGetAll(key string) (map[string]string, error) {
-	if redisConnection == nil {
-		return nil, fmt.Errorf("redis connection not initialized")
+// HGet Get field value from hash
+func (c *Client) HGet(ctx context.Context, key, field string) (string, error) {
+	client, err := c.getClient()
+	if err != nil {
+		return "", err
 	}
 
-	ctx := context.Background()
-	return redisConnection.HGetAll(ctx, key).Result()
+	return client.HGet(ctx, key, field).Result()
 }
 
-// LPush Push value to list (left push)
-func LPush(key string, values ...interface{}) error {
-	if redisConnection == nil {
-		return fmt.Errorf("redis connection not initialized")
+// HGetAll Get all field and values from hash
+func (c *Client) HGetAll(ctx context.Context, key string) (map[string]string, error) {
+	client, err := c.getClient()
+	if err != nil {
+		return nil, err
 	}
 
-	ctx := context.Background()
-	return redisConnection.LPush(ctx, key, values...).Err()
+	return client.HGetAll(ctx, key).Result()
 }
 
-// RPop Pop value from list (right pop)
-func RPop(key string) (string, error) {
-	if redisConnection == nil {
-		return "", fmt.Errorf("redis connection not initialized")
+// HMGet Get multiple field values from hash
+func (c *Client) HMGet(ctx context.Context, key string, fields ...string) ([]interface{}, error) {
+	client, err := c.getClient()
+	if err != nil {
+		return nil, err
 	}
 
-	ctx := context.Background()
-	return redisConnection.RPop(ctx, key).Result()
+	return client.HMGet(ctx, key, fields...).Result()
+}
+
+// HDel Delete hash field
+func (c *Client) HDel(ctx context.Context, key string, fields ...string) error {
+	client, err := c.getClient()
+	if err != nil {
+		return err
+	}
+
+	return client.HDel(ctx, key, fields...).Err()
+}
+
+// HExists Check if field exists in hash
+func (c *Client) HExists(ctx context.Context, key, field string) (bool, error) {
+	client, err := c.getClient()
+	if err != nil {
+		return false, err
+	}
+
+	return client.HExists(ctx, key, field).Result()
+}
+
+// HLen Get fields count in hash
+func (c *Client) HLen(ctx context.Context, key string) (int64, error) {
+	client, err := c.getClient()
+	if err != nil {
+		return 0, err
+	}
+
+	return client.HLen(ctx, key).Result()
+}
+
+// LPush Add values to the top of list
+func (c *Client) LPush(ctx context.Context, key string, values ...interface{}) error {
+	client, err := c.getClient()
+	if err != nil {
+		return err
+	}
+
+	return client.LPush(ctx, key, values...).Err()
+}
+
+// RPush Add values to the end of list
+func (c *Client) RPush(ctx context.Context, key string, values ...interface{}) error {
+	client, err := c.getClient()
+	if err != nil {
+		return err
+	}
+
+	return client.RPush(ctx, key, values...).Err()
+}
+
+// LPop Remove and return first value from list
+func (c *Client) LPop(ctx context.Context, key string) (string, error) {
+	client, err := c.getClient()
+	if err != nil {
+		return "", err
+	}
+
+	return client.LPop(ctx, key).Result()
+}
+
+// RPop Remove and return last value from list
+func (c *Client) RPop(ctx context.Context, key string) (string, error) {
+	client, err := c.getClient()
+	if err != nil {
+		return "", err
+	}
+
+	return client.RPop(ctx, key).Result()
 }
 
 // LLen Get list length
-func LLen(key string) (int64, error) {
-	if redisConnection == nil {
-		return 0, fmt.Errorf("redis connection not initialized")
+func (c *Client) LLen(ctx context.Context, key string) (int64, error) {
+	client, err := c.getClient()
+	if err != nil {
+		return 0, err
 	}
 
-	ctx := context.Background()
-	return redisConnection.LLen(ctx, key).Result()
+	return client.LLen(ctx, key).Result()
 }
 
-// SAdd Add value to set
-func SAdd(key string, values ...interface{}) error {
-	if redisConnection == nil {
-		return fmt.Errorf("redis connection not initialized")
+// LRange Get values from list in passed range
+func (c *Client) LRange(ctx context.Context, key string, start, stop int64) ([]string, error) {
+	client, err := c.getClient()
+	if err != nil {
+		return nil, err
 	}
 
-	ctx := context.Background()
-	return redisConnection.SAdd(ctx, key, values...).Err()
+	return client.LRange(ctx, key, start, stop).Result()
+}
+
+// LTrim Trim list for passed range
+func (c *Client) LTrim(ctx context.Context, key string, start, stop int64) error {
+	client, err := c.getClient()
+	if err != nil {
+		return err
+	}
+
+	return client.LTrim(ctx, key, start, stop).Err()
+}
+
+// SAdd Add values to set
+func (c *Client) SAdd(ctx context.Context, key string, values ...interface{}) error {
+	client, err := c.getClient()
+	if err != nil {
+		return err
+	}
+
+	return client.SAdd(ctx, key, values...).Err()
 }
 
 // SIsMember Check if value is in set
-func SIsMember(key string, value interface{}) (bool, error) {
-	if redisConnection == nil {
-		return false, fmt.Errorf("redis connection not initialized")
+func (c *Client) SIsMember(ctx context.Context, key string, value interface{}) (bool, error) {
+	client, err := c.getClient()
+	if err != nil {
+		return false, err
 	}
 
-	ctx := context.Background()
-	return redisConnection.SIsMember(ctx, key, value).Result()
+	return client.SIsMember(ctx, key, value).Result()
 }
 
 // SMembers Get all set members
-func SMembers(key string) ([]string, error) {
-	if redisConnection == nil {
-		return nil, fmt.Errorf("redis connection not initialized")
+func (c *Client) SMembers(ctx context.Context, key string) ([]string, error) {
+	client, err := c.getClient()
+	if err != nil {
+		return nil, err
 	}
 
-	ctx := context.Background()
-	return redisConnection.SMembers(ctx, key).Result()
+	return client.SMembers(ctx, key).Result()
+}
+
+// SRem Remove values from set
+func (c *Client) SRem(ctx context.Context, key string, values ...interface{}) error {
+	client, err := c.getClient()
+	if err != nil {
+		return err
+	}
+
+	return client.SRem(ctx, key, values...).Err()
+}
+
+// SCard Get values count in set
+func (c *Client) SCard(ctx context.Context, key string) (int64, error) {
+	client, err := c.getClient()
+	if err != nil {
+		return 0, err
+	}
+
+	return client.SCard(ctx, key).Result()
+}
+
+// SPop Delete and return random value from set
+func (c *Client) SPop(ctx context.Context, key string) (string, error) {
+	client, err := c.getClient()
+	if err != nil {
+		return "", err
+	}
+
+	return client.SPop(ctx, key).Result()
 }

@@ -3,25 +3,15 @@ package routes
 import (
 	"wallets/internal/handlers"
 	"wallets/internal/services"
-	"wallets/internal/services/chains"
 
 	"github.com/gofiber/fiber/v2"
 )
 
 func SetupRoutes(app *fiber.App) {
-	// Define chain services map (dependency injection)
-	chainServices := map[string]chains.ChainService{
-		"tron":     chains.NewTron(),
-		"ethereum": chains.NewEthereum(),
-		"bsc":      chains.NewEthereum(), // BSC equals Ethereum
-		"ton":      chains.NewTon(),
-		"bitcoin":  chains.NewBitcoin(),
-		"solana":   chains.NewSolana(),
-	}
 	// Init route handlers
 	tokensHandler := handlers.NewTokensHandler(services.NewTokensService())
-	walletsHandler := handlers.NewWalletsHandler(services.NewWalletsService(chainServices))
-	transactionsHandler := handlers.NewTransactionsHandler(services.NewTransactionsService(chainServices))
+	walletsHandler := handlers.NewWalletsHandler(services.NewWalletsService())
+	transactionsHandler := handlers.NewTransactionsHandler(services.NewTransactionsService())
 
 	// Set api routes group
 	api := app.Group("/api")
@@ -44,5 +34,5 @@ func SetupRoutes(app *fiber.App) {
 	transactions := api.Group("/transactions")
 	transactions.Get("/commission", transactionsHandler.GetTransactionCommission)
 	transactions.Get("/status", transactionsHandler.GetTransactionStatus)
-	transactions.Post("/", transactionsHandler.SendTransaction)
+	transactions.Post("/withdrawal", transactionsHandler.SendWithdrawal)
 }

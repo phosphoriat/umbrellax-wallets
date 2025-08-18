@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"strconv"
+	"sync"
+	"wallets/internal/services/api/aml"
 
 	"wallets/internal/config"
 	"wallets/internal/database/vault"
@@ -14,34 +16,53 @@ import (
 	"github.com/fbsobreira/gotron-sdk/pkg/client"
 )
 
+// Tron RPC connection struct
 type Tron struct {
-	code      string
+	BaseChainService
 	rpcClient *client.GrpcClient
 }
 
-// NewTron Create new instance of Tron
-func NewTron() *Tron {
+// Global package vars
+var (
+	tronInstance *Tron
+	tronOnce     sync.Once
+)
+
+// GetTron Get Tron chain instance
+func GetTron() *Tron {
+	tronOnce.Do(func() {
+		tronInstance = newTron()
+	})
+	return tronInstance
+}
+
+// @private newTron Create new instance of Tron (private constructor)
+func newTron() *Tron {
 	// Load config
 	cfg := config.Load()
-	// Create client with default options
+	// Create RPC client with default options
 	rpcClient := client.NewGrpcClient(cfg.TronRpcUrl)
 
 	// Start the connection to the RPC
 	err := rpcClient.Start(client.GRPCInsecure())
 	if err != nil {
-		log.Fatal("Failed to connect:", err)
+		log.Printf("failed to connect Tron RPC API: %v", err)
 	}
-	defer rpcClient.Stop()
 
 	return &Tron{
-		code:      "tron",
-		rpcClient: rpcClient,
+		BaseChainService: BaseChainService{Code: "tron"},
+		rpcClient:        rpcClient,
 	}
+}
+
+// GetCode Get network code
+func (tron *Tron) GetCode() string {
+	return tron.Code
 }
 
 // GetUserWallet Get user HD-wallet by user id and prefix
 func (tron *Tron) GetUserWallet(userId int, prefix *string) (string, error) {
-	masterData, err := vault.GetSecret("/master/" + tron.code)
+	masterData, err := vault.GetClient().GetSecret("/master/" + tron.Code)
 	if err != nil {
 		return "", fmt.Errorf("failed to get master data: %w", err)
 	}
@@ -51,7 +72,7 @@ func (tron *Tron) GetUserWallet(userId int, prefix *string) (string, error) {
 
 // GetMasterWallet Get master wallet
 func (tron *Tron) GetMasterWallet() (map[string]any, error) {
-	masterData, err := vault.GetSecret("/master/" + tron.code)
+	masterData, err := vault.GetClient().GetSecret("/master/" + tron.Code)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get master data: %w", err)
 	}
@@ -82,7 +103,14 @@ func (tron *Tron) GetTransactionStatus(hash string) (string, error) {
 }
 
 // SendTransaction Send transaction to the network
-func (tron *Tron) SendTransaction(currency string, to string, amount float64, comment *string) (map[string]any, error) {
+func (tron *Tron) SendTransaction(currency string, to string, amount float64) (map[string]any, error) {
+	
+	// @TODO AML Check transaction
+	amlId, err := aml.GetClient().CheckTransaction()
+	if err != nil {
+		return nil, fmt.Errorf("failed to AML check transaction: %w", err)
+	}
+
 	return map[string]any{}, nil
 }
 
@@ -109,6 +137,7 @@ func (tron *Tron) deriveAddress(masterAddress string, userId int, prefix *string
 	addressHex := "41" + hashHex[:40]
 	// Convert hex to bytes
 	addressBytes, _ := hex.DecodeString(addressHex)
+
 	// Convert to base58 (default TRON address)
 	return address.Address(addressBytes).String()
 }

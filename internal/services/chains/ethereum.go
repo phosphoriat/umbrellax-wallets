@@ -1,25 +1,53 @@
 package chains
 
 import (
+	"log"
+	"sync"
+
 	"wallets/internal/config"
 
-	"github.com/fbsobreira/gotron-sdk/pkg/client"
+	"github.com/ethereum/go-ethereum/ethclient"
 )
 
+// Ethereum RPC connection struct
 type Ethereum struct {
-	code string,
-	rpcClient *client.GrpcClient
+	BaseChainService
+	rpcClient *ethclient.Client
 }
 
-// NewEthereum Create new instance of Ethereum
-func NewEthereum() *Ethereum {
+// Global package vars
+var (
+	ethInstance *Ethereum
+	ethOnce     sync.Once
+)
+
+// GetEthereum Get Ethereum chain instance
+func GetEthereum() *Ethereum {
+	ethOnce.Do(func() {
+		ethInstance = newEthereum()
+	})
+	return ethInstance
+}
+
+// @private newEthereum Create new instance of Ethereum (private constructor)
+func newEthereum() *Ethereum {
 	// Load config
 	cfg := config.Load()
+	// Create RPC client with default options
+	rpcClient, err := ethclient.Dial(cfg.EthRpcUrl)
+	if err != nil {
+		log.Printf("failed to connect Ethereum RPC API: %v", err)
+	}
 
 	return &Ethereum{
-		code: "ethereum",
-		rpcClient: rpcClient,
+		BaseChainService: BaseChainService{Code: "ethereum"},
+		rpcClient:        rpcClient,
 	}
+}
+
+// GetCode Get network code
+func (eth *Ethereum) GetCode() string {
+	return eth.Code
 }
 
 // GetUserWallet Get user HD-wallet by user id and prefix
@@ -43,7 +71,7 @@ func (eth *Ethereum) GetTransactionStatus(hash string) (string, error) {
 }
 
 // SendTransaction Send transaction to the network
-func (eth *Ethereum) SendTransaction(currency string, to string, amount float64, comment *string) (map[string]any, error) {
+func (eth *Ethereum) SendTransaction(currency string, to string, amount float64) (map[string]any, error) {
 
 }
 

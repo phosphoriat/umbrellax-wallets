@@ -1,25 +1,22 @@
 package services
 
 import (
-	"fmt"
 	"wallets/internal/services/chains"
 )
 
-type WalletsService struct {
-	chains map[string]chains.ChainService
-}
+type WalletsService struct{}
 
 // NewWalletsService Create new instance of WalletsService
-func NewWalletsService(chains map[string]chains.ChainService) *WalletsService {
-	return &WalletsService{chains}
+func NewWalletsService() *WalletsService {
+	return &WalletsService{}
 }
 
 // GetUserWallet Get user HD-wallet by user id
-func (service *WalletsService) GetUserWallet(userId int, network string) (map[string]string, error) {
-	// Get chain instance from injected dependencies
-	chainService, exists := service.chains[network]
-	if !exists {
-		return nil, fmt.Errorf("unsupported network: %s", network)
+func (s *WalletsService) GetUserWallet(userId int, network string) (map[string]any, error) {
+	// Get chain service instance from registry
+	chainService, err := chains.GetChainService(network)
+	if err != nil {
+		return nil, err
 	}
 
 	address, err := chainService.GetUserWallet(userId, nil)
@@ -27,17 +24,17 @@ func (service *WalletsService) GetUserWallet(userId int, network string) (map[st
 		return nil, err
 	}
 
-	return map[string]string{
+	return map[string]any{
 		"address": address,
 	}, nil
 }
 
 // GetMasterWallet Get master wallet info by network
-func (service *WalletsService) GetMasterWallet(network string) (map[string]any, error) {
-	// Get chain instance from injected dependencies
-	chainService, exists := service.chains[network]
-	if !exists {
-		return nil, fmt.Errorf("unsupported network: %s", network)
+func (s *WalletsService) GetMasterWallet(network string) (map[string]any, error) {
+	// Get chain service instance from registry
+	chainService, err := chains.GetChainService(network)
+	if err != nil {
+		return nil, err
 	}
 
 	wallet, err := chainService.GetMasterWallet()

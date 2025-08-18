@@ -5,11 +5,9 @@ import (
 	"wallets/internal/repository"
 )
 
-type (
-	ActionService struct {
-		actionRepo repository.ActionRepository
-	}
-)
+type ActionService struct {
+	actionRepo repository.ActionRepository
+}
 
 // NewActionService Create new instance of ActionService
 func NewActionService(actionRepo repository.ActionRepository) *ActionService {

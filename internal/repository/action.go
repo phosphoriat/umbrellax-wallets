@@ -1,22 +1,20 @@
 package repository
 
 import (
-	"wallets/internal/database"
+	"wallets/internal/database/pgsql"
 	"wallets/internal/models"
 
 	"gorm.io/gorm"
 )
 
-type (
-	ActionRepository struct {
-		db *gorm.DB
-	}
-)
+type ActionRepository struct {
+	db *gorm.DB
+}
 
 // NewActionRepository Create new instance of ActionRepository
 func NewActionRepository() *ActionRepository {
 	return &ActionRepository{
-		db: database.GetConnection(),
+		db: pgsql.GetDB(),
 	}
 }
 

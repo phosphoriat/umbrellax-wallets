@@ -31,7 +31,6 @@ type (
 		Currency string  `validate:"required,oneof=UMBRELLA USDT ETH TON BTC SOL"`
 		To       string  `validate:"required"`
 		Amount   float64 `validate:"required,gt=0"`
-		Comment  string  `validate:""`
 	}
 )
 
@@ -62,7 +61,7 @@ func (h *TransactionsHandler) GetTransactionCommission(c *fiber.Ctx) error {
 }
 
 // GetTransactionStatus
-// GET /api/transactions/status?hash={hash}
+// GET /api/transactions/status?network={network}&hash={hash}
 func (h *TransactionsHandler) GetTransactionStatus(c *fiber.Ctx) error {
 	params := &GetTransactionStatusQuery{
 		Network: c.Query("network"),
@@ -80,22 +79,21 @@ func (h *TransactionsHandler) GetTransactionStatus(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"status": res})
 }
 
-// SendTransaction
-// POST /api/transactions?network={network}&currency={currency}&to={to}&amount={amount}&comment={comment}
-func (h *TransactionsHandler) SendTransaction(c *fiber.Ctx) error {
+// SendWithdrawal
+// POST /api/transactions/withdrawal?network={network}&currency={currency}&to={to}&amount={amount}
+func (h *TransactionsHandler) SendWithdrawal(c *fiber.Ctx) error {
 	params := &SendTransactionQuery{
 		Network:  c.Query("network"),
 		Currency: c.Query("currency"),
 		To:       c.Query("to"),
 		Amount:   c.QueryFloat("amount"),
-		Comment:  c.Query("comment"),
 	}
 
 	if err := middleware.ValidateStruct(params); err != nil {
 		return c.JSON(err)
 	}
 
-	res, err := h.service.SendTransaction(params.Currency, params.Network, params.To, params.Amount, &params.Comment)
+	res, err := h.service.SendWithdrawal(params.Currency, params.Network, params.To, params.Amount)
 	if err != nil {
 		return c.JSON(err)
 	}

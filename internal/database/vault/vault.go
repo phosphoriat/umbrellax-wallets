@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"wallets/internal/config"
@@ -11,81 +12,125 @@ import (
 	"github.com/hashicorp/vault/api"
 )
 
-// Global Vault connection var
-var vaultClient *api.Client
+// Client Vault connection struct
+type Client struct {
+	vault *api.Client
+	mu    sync.RWMutex
+}
 
-// Init connection to Vault
+// Global package vars
+var (
+	clientInstance *Client
+	once           sync.Once
+)
+
+// GetClient Get global Vault Client instance
+func GetClient() *Client {
+	return clientInstance
+}
+
+// Init Vault connection (singleton)
 func Init(cfg *config.Config) error {
+	var err error
+	once.Do(func() {
+		clientInstance, err = newVaultClient(cfg)
+	})
+	return err
+}
+
+// Close global Redis connection
+func Close() error {
+	if clientInstance == nil {
+		return nil
+	}
+	return clientInstance.closeConnection()
+}
+
+// @private newVaultClient Create new Vault Client instance (private constructor)
+func newVaultClient(cfg *config.Config) (*Client, error) {
 	// Configure Vault client
 	vaultConfig := api.DefaultConfig()
 	vaultConfig.Address = fmt.Sprintf("%s://%s:%s", cfg.VaultScheme, cfg.VaultHost, cfg.VaultPort)
 	vaultConfig.Timeout = 10 * time.Second
 
 	// Create Vault client
-	client, err := api.NewClient(vaultConfig)
+	vaultClient, err := api.NewClient(vaultConfig)
 	if err != nil {
-		return fmt.Errorf("failed to create Vault client: %w", err)
+		return nil, fmt.Errorf("failed to create Vault client: %w", err)
 	}
 
 	// Set authentication token, if defined in config
 	if cfg.VaultToken != "" {
-		client.SetToken(cfg.VaultToken)
+		vaultClient.SetToken(cfg.VaultToken)
 	}
 
 	// Test connection
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	health, err := client.Sys().HealthWithContext(ctx)
+	health, err := vaultClient.Sys().HealthWithContext(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to check Vault health: %w", err)
+		return nil, fmt.Errorf("failed to check Vault health: %w", err)
 	}
 	if !health.Initialized {
-		return fmt.Errorf("vault is not initialized")
+		return nil, fmt.Errorf("vault is not initialized")
 	}
 	if health.Sealed {
-		return fmt.Errorf("vault is sealed")
+		return nil, fmt.Errorf("vault is sealed")
 	}
 
-	// Assign client to global variable
-	vaultClient = client
 	log.Printf("Vault connection established: %s://%s:%s (Version: %s)",
 		cfg.VaultScheme, cfg.VaultHost, cfg.VaultPort, health.Version)
 
-	// Auth using AppRole, if defined in config
-	if cfg.VaultRoleId != "" && cfg.VaultSecretId != "" {
-		if err := authWithAppRole(cfg.VaultRoleId, cfg.VaultSecretId); err != nil {
-			return fmt.Errorf("failed to auth with AppRole: %w", err)
-		}
-		log.Println("Successfully auth with Vault using AppRole")
+	client := &Client{
+		vault: vaultClient,
 	}
 
-	return nil
+	// Auth using AppRole, if defined in config
+	if cfg.VaultRoleId != "" && cfg.VaultSecretId != "" {
+		if err := client.authWithAppRole(cfg.VaultRoleId, cfg.VaultSecretId); err != nil {
+			return nil, fmt.Errorf("failed to auth with AppRole: %w", err)
+		}
+		log.Printf("Successfully auth with Vault using AppRole")
+	}
+
+	return client, nil
 }
 
-// GetVaultClient Return Vault client instance
-func GetVaultClient() *api.Client {
-	return vaultClient
+// @private getClient Get Vault client instance
+func (c *Client) getClient() (*api.Client, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if c.vault == nil {
+		return nil, fmt.Errorf("vault client is not initialized")
+	}
+
+	return c.vault, nil
 }
 
-// Close Vault connection (cleanup)
-func Close() error {
-	if vaultClient != nil {
+// @private closeConnection Close Vault connection
+func (c *Client) closeConnection() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.vault != nil {
 		// Vault client doesn't need explicit closing, but we can clear the token
-		vaultClient.ClearToken()
-		vaultClient = nil
+		c.vault.ClearToken()
+		c.vault = nil
 	}
 
 	return nil
 }
 
 // GetSecret Get secret from Vault KV store
-func GetSecret(path string) (map[string]interface{}, error) {
-	if vaultClient == nil {
-		return nil, fmt.Errorf("vault client not initialized")
+func (c *Client) GetSecret(path string) (map[string]interface{}, error) {
+	client, err := c.getClient()
+	if err != nil {
+		return nil, err
 	}
 
-	secret, err := vaultClient.Logical().Read(path)
+	secret, err := client.Logical().Read(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read secret from %s: %w", path, err)
 	}
@@ -98,8 +143,8 @@ func GetSecret(path string) (map[string]interface{}, error) {
 }
 
 // GetSecretValue Get specific value from secret
-func GetSecretValue(path, key string) (interface{}, error) {
-	secretData, err := GetSecret(path)
+func (c *Client) GetSecretValue(path, key string) (interface{}, error) {
+	secretData, err := c.GetSecret(path)
 	if err != nil {
 		return nil, err
 	}
@@ -121,9 +166,10 @@ func GetSecretValue(path, key string) (interface{}, error) {
 }
 
 // SetSecret Set secret in Vault KV store
-func SetSecret(path string, data map[string]interface{}) error {
-	if vaultClient == nil {
-		return fmt.Errorf("vault client not initialized")
+func (c *Client) SetSecret(path string, data map[string]interface{}) error {
+	client, err := c.getClient()
+	if err != nil {
+		return err
 	}
 
 	// For KV v2, we need to wrap data under "data" key
@@ -131,7 +177,7 @@ func SetSecret(path string, data map[string]interface{}) error {
 		"data": data,
 	}
 
-	_, err := vaultClient.Logical().Write(path, wrappedData)
+	_, err = client.Logical().Write(path, wrappedData)
 	if err != nil {
 		return fmt.Errorf("failed to write secret to %s: %w", path, err)
 	}
@@ -140,19 +186,20 @@ func SetSecret(path string, data map[string]interface{}) error {
 }
 
 // @private authWithAppRole Auth using AppRole method
-func authWithAppRole(roleID, secretID string) error {
-	if vaultClient == nil {
-		return fmt.Errorf("vault client not initialized")
+func (c *Client) authWithAppRole(roleId string, secretId string) error {
+	client, err := c.getClient()
+	if err != nil {
+		return err
 	}
 
 	// Prepare AppRole authentication data
 	data := map[string]interface{}{
-		"role_id":   roleID,
-		"secret_id": secretID,
+		"role_id":   roleId,
+		"secret_id": secretId,
 	}
 
 	// Try to auth
-	resp, err := vaultClient.Logical().Write("auth/approle/login", data)
+	resp, err := client.Logical().Write("auth/approle/login", data)
 	if err != nil {
 		return fmt.Errorf("AppRole authentication failed: %w", err)
 	}
@@ -161,7 +208,7 @@ func authWithAppRole(roleID, secretID string) error {
 	}
 
 	// Set the token from the response
-	vaultClient.SetToken(resp.Auth.ClientToken)
+	client.SetToken(resp.Auth.ClientToken)
 
 	return nil
 }

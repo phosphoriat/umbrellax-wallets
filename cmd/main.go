@@ -10,9 +10,12 @@ import (
 	"time"
 
 	"wallets/internal/config"
-	"wallets/internal/database"
+	"wallets/internal/database/pgsql"
+	"wallets/internal/database/redis"
+	"wallets/internal/database/vault"
 	"wallets/internal/routes"
 	"wallets/internal/services/api/bybit"
+	_ "wallets/internal/services/chains"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/logger"
@@ -26,14 +29,27 @@ func main() {
 		log.Fatal("Failed to load config.")
 	}
 
-	// Init database (PgSQL, ClickHouse, Redis, Vault) connections
-	if err := database.InitDB(cfg); err != nil {
-		log.Fatal("Failed to initialize connection:", err)
+	// Init PostgreSQL and apply auto-migrations once, if needed
+	if err := pgsql.Init(cfg); err != nil {
+		log.Fatal("Failed to initialize PostgreSQL:", err)
 	}
+	defer pgsql.Close()
+
+	// Init Vault
+	if err := vault.Init(cfg); err != nil {
+		log.Fatal("Failed to initialize Vault:", err)
+	}
+	defer vault.Close()
+
+	// Init Redis
+	if err := redis.Init(cfg); err != nil {
+		log.Fatal("Failed to initialize Redis:", err)
+	}
+	defer redis.Close()
 
 	/* Init services */
-	// Init Bybit websocket wallet stream
-	bybit.InitWalletStream(cfg)
+	// Init Bybit service
+	bybit.Init(cfg)
 
 	// Create app instance
 	app := fiber.New(fiber.Config{
@@ -77,11 +93,11 @@ func main() {
 	go func() {
 		log.Printf("Server starting on %s", address)
 		if err := app.Listen(address); err != nil {
-			log.Fatal("Server failed to start:", err)
+			log.Fatalf("server failed to start: %v", err)
 		}
 	}()
 
-	// Graceful server shutdown
+	// Server graceful shutdown
 	gracefulShutdown(app)
 }
 
@@ -105,6 +121,5 @@ func gracefulShutdown(app *fiber.App) {
 	if err := app.ShutdownWithContext(ctx); err != nil {
 		log.Printf("Server forced to shutdown: %v", err)
 	}
-
 	log.Println("Server exited")
 }
