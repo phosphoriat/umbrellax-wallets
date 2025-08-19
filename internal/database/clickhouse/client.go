@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+
 	"wallets/internal/config"
 
 	"github.com/ClickHouse/clickhouse-go/v2"

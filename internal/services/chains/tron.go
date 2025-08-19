@@ -7,10 +7,10 @@ import (
 	"log"
 	"strconv"
 	"sync"
-	"wallets/internal/services/api/aml"
 
 	"wallets/internal/config"
 	"wallets/internal/database/vault"
+	"wallets/internal/services/api/aml"
 
 	"github.com/fbsobreira/gotron-sdk/pkg/address"
 	"github.com/fbsobreira/gotron-sdk/pkg/client"
@@ -64,7 +64,7 @@ func (tron *Tron) GetCode() string {
 
 // GetUserWallet Get user HD-wallet by user id and prefix (if passed)
 func (tron *Tron) GetUserWallet(userId int, prefix *string) (string, error) {
-	masterData, err := vault.GetClient().GetSecret("/master/" + tron.Code)
+	masterData, err := vault.GetClient().GetSecret("/master/" + tron.NetworkCode)
 	if err != nil {
 		return "", fmt.Errorf("failed to get master data: %w", err)
 	}
@@ -74,7 +74,7 @@ func (tron *Tron) GetUserWallet(userId int, prefix *string) (string, error) {
 
 // GetMasterWallet Get master wallet
 func (tron *Tron) GetMasterWallet() (map[string]any, error) {
-	masterData, err := vault.GetClient().GetSecret("/master/" + tron.Code)
+	masterData, err := vault.GetClient().GetSecret("/master/" + tron.NetworkCode)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get master data: %w", err)
 	}
