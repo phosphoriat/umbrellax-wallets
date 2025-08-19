@@ -15,6 +15,8 @@ import (
 	"wallets/internal/database/vault"
 	"wallets/internal/routes"
 	"wallets/internal/services/api/bybit"
+	"wallets/internal/services/api/bybit/requests"
+	"wallets/internal/services/api/bybit/withdrawals"
 	_ "wallets/internal/services/chains"
 
 	"github.com/gofiber/fiber/v2"
@@ -50,6 +52,12 @@ func main() {
 	/* Init services */
 	// Init Bybit service
 	bybit.Init(cfg)
+	// Init Bybit websocket wallet stream
+	bybit.InitWalletStream(cfg)
+	// Init read Bybit requests from Redis hash
+	requests.InitRequestsRead(cfg)
+	// Init read Bybit withdrawals from Redis hash
+	withdrawals.InitWithdrawalsRead(cfg)
 
 	// Create app instance
 	app := fiber.New(fiber.Config{

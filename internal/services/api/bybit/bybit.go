@@ -18,6 +18,7 @@ import (
 // HTTPClient Bybit HTTP client struct
 type HTTPClient struct {
 	bybit *bybitApi.Client
+	ctx   context.Context
 }
 
 // Global package vars
@@ -35,11 +36,6 @@ func GetHTTPClient() *HTTPClient {
 func Init(cfg *config.Config) {
 	once.Do(func() {
 		clientInstance = newHTTPClient(cfg)
-
-		// Init Bybit websocket wallet stream
-		InitWalletStream(cfg)
-		// Init Bybit withdrawals read from Redis hash
-		InitWithdrawalsRead(cfg)
 	})
 }
 
@@ -47,6 +43,7 @@ func Init(cfg *config.Config) {
 func newHTTPClient(cfg *config.Config) *HTTPClient {
 	return &HTTPClient{
 		bybit: bybitApi.NewBybitHttpClient(cfg.BybitApiKey, cfg.BybitApiSecret, bybitApi.WithBaseURL(bybitApi.MAINNET)),
+		ctx:   context.Background(),
 	}
 }
 
@@ -54,7 +51,7 @@ func newHTTPClient(cfg *config.Config) *HTTPClient {
 // @docs https://bybit-exchange.github.io/docs/v5/asset/coin-info
 func (c *HTTPClient) GetCoinInfo(coin, network string) (map[string]any, error) {
 	params := map[string]any{"coin": coin}
-	response, err := c.bybit.NewUtaBybitServiceWithParams(params).GetCoinInfo(context.Background())
+	response, err := c.bybit.NewUtaBybitServiceWithParams(params).GetCoinInfo(c.ctx)
 	if err != nil {
 		return nil, fmt.Errorf("request error: %w", err)
 	}
@@ -145,7 +142,7 @@ func (c *HTTPClient) GetMasterWalletAddress(coin, network string) (string, error
 		"coin":      coin,
 		"chainType": strings.ToUpper(network),
 	}
-	response, err := c.bybit.NewUtaBybitServiceWithParams(params).GetMasterAccDepositAddress(context.Background())
+	response, err := c.bybit.NewUtaBybitServiceWithParams(params).GetMasterAccDepositAddress(c.ctx)
 	if err != nil {
 		return "", fmt.Errorf("request error: %w", err)
 	}
@@ -179,7 +176,7 @@ func (c *HTTPClient) GetWalletBalance(coin, accountType string) (float64, error)
 		"coin":        coin,
 		"accountType": accountType,
 	}
-	response, err := c.bybit.NewUtaBybitServiceWithParams(params).GetAccountWallet(context.Background())
+	response, err := c.bybit.NewUtaBybitServiceWithParams(params).GetAccountWallet(c.ctx)
 	if err != nil {
 		return 0, fmt.Errorf("request error: %w", err)
 	}
@@ -214,15 +211,8 @@ func (c *HTTPClient) GetWalletBalance(coin, accountType string) (float64, error)
 
 // GetWithdrawalRecords Get withdrawal records
 // @docs https://bybit-exchange.github.io/docs/v5/asset/withdraw/withdraw-record
-func (c *HTTPClient) GetWithdrawalRecords(coin string, startTime *string) ([]any, error) {
-	params := map[string]any{
-		"coin": coin,
-	}
-	if startTime != nil {
-		params["startTime"] = *startTime
-	}
-
-	response, err := c.bybit.NewUtaBybitServiceWithParams(params).GetWithdrawalRecords(context.Background())
+func (c *HTTPClient) GetWithdrawalRecords(params map[string]any) ([]any, error) {
+	response, err := c.bybit.NewUtaBybitServiceWithParams(params).GetWithdrawalRecords(c.ctx)
 	if err != nil {
 		return nil, fmt.Errorf("request error: %w", err)
 	}
@@ -281,7 +271,7 @@ func (c *HTTPClient) CreateWithdraw(coin, chain string, amount float64) (string,
 		"forceChain":  1,
 	}
 
-	response, err := c.bybit.NewUtaBybitServiceWithParams(params).CreateWithdraw(context.Background())
+	response, err := c.bybit.NewUtaBybitServiceWithParams(params).CreateWithdraw(c.ctx)
 	if err != nil || response.RetCode != 0 {
 		if err != nil {
 			return "", fmt.Errorf("request error: %w", err)
@@ -308,7 +298,7 @@ func (c *HTTPClient) CreateInternalTransfer(coin, amount, fromAccountType, toAcc
 		"fromAccountType": fromAccountType,
 		"toAccountType":   toAccountType,
 	}
-	response, err := c.bybit.NewUtaBybitServiceWithParams(params).CreateInternalTransfer(context.Background())
+	response, err := c.bybit.NewUtaBybitServiceWithParams(params).CreateInternalTransfer(c.ctx)
 	if err != nil {
 		return 0, fmt.Errorf("request error: %w", err)
 	}

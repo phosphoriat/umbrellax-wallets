@@ -34,21 +34,24 @@ func newEthereum() *Ethereum {
 	// Load config
 	cfg := config.Load()
 
-	// Create RPC client
+	// Create new RPC client
 	ethClient, err := ethclient.Dial(cfg.EthRpcUrl)
 	if err != nil {
 		log.Printf("failed to connect Ethereum RPC API: %v", err)
 	}
 
 	return &Ethereum{
-		BaseChainService: BaseChainService{Code: "ethereum"},
-		Client:           ethClient,
+		BaseChainService: BaseChainService{
+			NetworkCode: "ethereum",
+			AmlTokenId:  "",
+		},
+		Client: ethClient,
 	}
 }
 
 // GetCode Get network code
 func (eth *Ethereum) GetCode() string {
-	return eth.Code
+	return eth.NetworkCode
 }
 
 // GetUserWallet Get user HD-wallet by user id and prefix

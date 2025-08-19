@@ -34,21 +34,24 @@ func newBsc() *Bsc {
 	// Load config
 	cfg := config.Load()
 
-	// Create RPC client
+	// Create new RPC client
 	ethClient, err := ethclient.Dial(cfg.BscRrcUrl)
 	if err != nil {
 		log.Printf("failed to connect Bsc RPC API: %v", err)
 	}
 
 	return &Bsc{
-		BaseChainService: BaseChainService{Code: "bsc"},
-		Client:           ethClient,
+		BaseChainService: BaseChainService{
+			NetworkCode: "bsc",
+			AmlTokenId:  "",
+		},
+		Client: ethClient,
 	}
 }
 
 // GetCode Get network code
 func (bsc *Bsc) GetCode() string {
-	return bsc.Code
+	return bsc.NetworkCode
 }
 
 // GetUserWallet Get user HD-wallet by user id and prefix

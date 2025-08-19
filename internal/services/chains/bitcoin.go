@@ -48,14 +48,17 @@ func newBitcoin() *Bitcoin {
 	}
 
 	return &Bitcoin{
-		BaseChainService: BaseChainService{Code: "bitcoin"},
-		Client:           client,
+		BaseChainService: BaseChainService{
+			NetworkCode: "bitcoin",
+			AmlTokenId:  "",
+		},
+		Client: client,
 	}
 }
 
 // GetCode Get network code
 func (btc *Bitcoin) GetCode() string {
-	return btc.Code
+	return btc.NetworkCode
 }
 
 // GetUserWallet Get user HD-wallet by user id and prefix

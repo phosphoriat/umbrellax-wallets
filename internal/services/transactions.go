@@ -55,7 +55,7 @@ func (s *TransactionsService) SendWithdrawal(network, currency, to string, amoun
 		return nil, err
 	}
 
-	res, err := chains.CreateBybitWithdrawRequest(currency, network, to, amount)
+	res, err := chains.CreateWithdrawRequest(currency, network, to, amount)
 	if err != nil {
 		return nil, err
 	}

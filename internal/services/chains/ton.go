@@ -28,18 +28,21 @@ func GetTon() *Ton {
 
 // @private newTon Create new instance of Ton (private constructor)
 func newTon() *Ton {
-	// Create Ton ADNL API client
+	// Create new Ton ADNL API client
 	apiClient := ton.NewAPIClient(liteclient.NewConnectionPool()).WithRetry()
 
 	return &Ton{
-		BaseChainService: BaseChainService{Code: "ton"},
-		Client:           apiClient,
+		BaseChainService: BaseChainService{
+			NetworkCode: "ton",
+			AmlTokenId:  "",
+		},
+		Client: apiClient,
 	}
 }
 
 // GetCode Get network code
 func (ton *Ton) GetCode() string {
-	return ton.Code
+	return ton.NetworkCode
 }
 
 // GetUserWallet Get user HD-wallet by user id and prefix

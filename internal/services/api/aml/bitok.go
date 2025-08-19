@@ -56,7 +56,7 @@ func newBitokClient() *Client {
 }
 
 // CheckAddress Manual check address
-func (c *Client) CheckAddress(network, currency, address string) (map[string]interface{}, error) {
+func (c *Client) CheckAddress(network, tokenId, address string) (map[string]interface{}, error) {
 	timestamp := time.Now().UnixMilli()
 	endpoint := "/v1/manual-checks/check-address/"
 
@@ -81,7 +81,7 @@ func (c *Client) CheckAddress(network, currency, address string) (map[string]int
 }
 
 // CheckTransaction Manual check transaction
-func (c *Client) CheckTransaction(network, currency, hash, toAddress string) (map[string]interface{}, error) {
+func (c *Client) CheckTransaction(network, tokenId, hash, toAddress string) (map[string]interface{}, error) {
 	timestamp := time.Now().UnixMilli()
 	endpoint := "/v1/manual-checks/check-transfer/"
 

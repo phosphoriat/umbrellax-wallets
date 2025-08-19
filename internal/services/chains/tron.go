@@ -41,7 +41,7 @@ func newTron() *Tron {
 	// Load config
 	cfg := config.Load()
 
-	// Create RPC client
+	// Create new RPC client
 	rpcClient := client.NewGrpcClient(cfg.TronRpcUrl)
 	err := rpcClient.Start(client.GRPCInsecure())
 	if err != nil {
@@ -49,17 +49,20 @@ func newTron() *Tron {
 	}
 
 	return &Tron{
-		BaseChainService: BaseChainService{Code: "tron"},
-		Client:           rpcClient,
+		BaseChainService: BaseChainService{
+			NetworkCode: "tron",
+			AmlTokenId:  "",
+		},
+		Client: rpcClient,
 	}
 }
 
 // GetCode Get network code
 func (tron *Tron) GetCode() string {
-	return tron.Code
+	return tron.NetworkCode
 }
 
-// GetUserWallet Get user HD-wallet by user id and prefix
+// GetUserWallet Get user HD-wallet by user id and prefix (if passed)
 func (tron *Tron) GetUserWallet(userId int, prefix *string) (string, error) {
 	masterData, err := vault.GetClient().GetSecret("/master/" + tron.Code)
 	if err != nil {
@@ -103,14 +106,19 @@ func (tron *Tron) GetTransactionStatus(hash string) (string, error) {
 
 // SendTransaction Send transaction to the network
 func (tron *Tron) SendTransaction(currency string, to string, amount float64) (map[string]any, error) {
+	// Send new transactions on chain and get hash
+	hash := ""
 
-	// @TODO AML Check transaction
-	amlId, err := aml.GetClient().CheckTransaction()
+	// @TODO AML Check transaction by hash and get aml id
+	amlId, err := aml.GetClient().CheckTransaction(tron.NetworkCode, tron.AmlTokenId, hash, to)
 	if err != nil {
 		return nil, fmt.Errorf("failed to AML check transaction: %w", err)
 	}
 
-	return map[string]any{}, nil
+	return map[string]any{
+		"hash":   hash,
+		"aml_id": amlId,
+	}, nil
 }
 
 // ProcessInboundTransactions Process inbound transactions

@@ -36,14 +36,17 @@ func newSolana() *Solana {
 	client := rpc.New(cfg.SolRpcUrl)
 
 	return &Solana{
-		BaseChainService: BaseChainService{Code: "solana"},
-		rpcClient:        client,
+		BaseChainService: BaseChainService{
+			NetworkCode: "solana",
+			AmlTokenId:  "",
+		},
+		rpcClient: client,
 	}
 }
 
 // GetCode Get network code
 func (sol *Solana) GetCode() string {
-	return sol.Code
+	return sol.NetworkCode
 }
 
 // GetUserWallet Get user HD-wallet by user id and prefix

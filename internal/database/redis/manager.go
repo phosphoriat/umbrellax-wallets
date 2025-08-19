@@ -272,6 +272,25 @@ func (c *Client) HLen(ctx context.Context, key string) (int64, error) {
 	return client.HLen(ctx, key).Result()
 }
 
+// GetFirstHashElement Get first element from hash
+func (c *Client) GetFirstHashElement(ctx context.Context, key string) (string, string, error) {
+	client, err := c.getClient()
+	if err != nil {
+		return "", "", err
+	}
+
+	keys, _, err := client.HScan(ctx, key, 0, "", 1).Result()
+	if err != nil {
+		return "", "", err
+	}
+
+	if len(keys) < 2 {
+		return "", "", fmt.Errorf("hash '%s' is empty or invalid", key)
+	}
+
+	return keys[0], keys[1], nil
+}
+
 // LPush Add values to the top of list
 func (c *Client) LPush(ctx context.Context, key string, values ...interface{}) error {
 	client, err := c.getClient()

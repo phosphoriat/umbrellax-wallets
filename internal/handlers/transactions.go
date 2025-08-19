@@ -15,19 +15,19 @@ type (
 
 	// GetTransactionCommissionQuery validation rules
 	GetTransactionCommissionQuery struct {
-		Network  string  `validate:"required,oneof=tron eth bsc ton bitcoin solana"`
+		Network  string  `validate:"required,oneof=tron ethereum bsc ton bitcoin solana"`
 		Currency string  `validate:"required,oneof=UMBRELLA USDT ETH TON BTC SOL"`
 		To       string  `validate:"required"`
 		Amount   float64 `validate:"required,gt=0"`
 	}
 	// GetTransactionStatusQuery validation rules
 	GetTransactionStatusQuery struct {
-		Network string `validate:"required,oneof=tron eth bsc ton bitcoin solana"`
+		Network string `validate:"required,oneof=tron ethereum bsc ton bitcoin solana"`
 		Hash    string `validate:"required"`
 	}
 	// SendTransactionQuery validation rules
 	SendTransactionQuery struct {
-		Network  string  `validate:"required,oneof=tron eth bsc ton bitcoin solana"`
+		Network  string  `validate:"required,oneof=tron ethereum bsc ton bitcoin solana"`
 		Currency string  `validate:"required,oneof=UMBRELLA USDT ETH TON BTC SOL"`
 		To       string  `validate:"required"`
 		Amount   float64 `validate:"required,gt=0"`

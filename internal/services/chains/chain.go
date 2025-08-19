@@ -12,9 +12,10 @@ import (
 )
 
 type (
-	// BaseChainService Common functionality for all chains
+	// BaseChainService Common fields struct for all chains
 	BaseChainService struct {
-		Code string
+		NetworkCode string
+		AmlTokenId  string
 	}
 
 	// ChainService Interface with all chain methods
@@ -29,23 +30,22 @@ type (
 	}
 )
 
-// CreateBybitWithdrawRequest Create withdraw request to bybit
-func CreateBybitWithdrawRequest(currency, network, address string, amount float64) (map[string]any, error) {
-	// Params for withdraw request to master wallet (step 1)
-	params := map[string]any{
+// CreateWithdrawRequest Put new withdraw request in the queue and return queue_id
+func CreateWithdrawRequest(currency, network, address string, amount float64) (map[string]any, error) {
+	// Load config
+	cfg := config.Load()
+
+	// Get withdraw request to master wallet item encoded in JSON
+	reqItem, err := json.Marshal(map[string]any{
 		"currency": currency,
 		"network":  network,
 		"address":  address,
 		"amount":   amount,
-	}
-
-	reqItem, err := json.Marshal(params)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal withdraw request item: %w", err)
 	}
 
-	// Load config
-	cfg := config.Load()
 	// Generate unique request id
 	requestId := uuid.New().String()
 	// Add withdraw request item to Redis bybit withdrawal requests hash

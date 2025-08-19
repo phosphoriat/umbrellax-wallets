@@ -26,13 +26,14 @@ type Config struct {
 	ClickhouseUser     string
 	ClickhousePassword string
 	// Redis
-	RedisHost           string
-	RedisPort           string
-	RedisDatabase       int
-	RedisPassword       string
-	RedisWithdrawalsKey string
-	RedisRefillsKey     string
-	RedisBybitReqsKey   string
+	RedisHost                string
+	RedisPort                string
+	RedisDatabase            int
+	RedisPassword            string
+	RedisWithdrawalsKey      string
+	RedisRefillsKey          string
+	RedisBybitReqsKey        string
+	RedisBybitWithdrawalsKey string
 	// Vault
 	VaultHost     string
 	VaultPort     string
@@ -93,13 +94,14 @@ func Load() *Config {
 		ClickhouseUser:     getEnv("CLICKHOUSE_USER", ""),
 		ClickhousePassword: getEnv("CLICKHOUSE_PASSWORD", ""),
 		// Redis
-		RedisHost:           getEnv("REDIS_HOST", "localhost"),
-		RedisPort:           getEnv("REDIS_PORT", "6379"),
-		RedisDatabase:       getEnvAsInt("REDIS_DATABASE", 3),
-		RedisPassword:       getEnv("REDIS_PASSWORD", ""),
-		RedisBybitReqsKey:   getEnv("REDIS_BYBIT_REQS_KEY", ""),
-		RedisWithdrawalsKey: getEnv("REDIS_WITHDRAWALS_KEY", ""),
-		RedisRefillsKey:     getEnv("REDIS_REFILLS_KEY", ""),
+		RedisHost:                getEnv("REDIS_HOST", "localhost"),
+		RedisPort:                getEnv("REDIS_PORT", "6379"),
+		RedisDatabase:            getEnvAsInt("REDIS_DATABASE", 3),
+		RedisPassword:            getEnv("REDIS_PASSWORD", ""),
+		RedisBybitReqsKey:        getEnv("REDIS_BYBIT_REQUESTS_KEY", ""),
+		RedisBybitWithdrawalsKey: getEnv("REDIS_BYBIT_WITHDRAWALS_KEY", ""),
+		RedisWithdrawalsKey:      getEnv("REDIS_WITHDRAWALS_KEY", ""),
+		RedisRefillsKey:          getEnv("REDIS_REFILLS_KEY", ""),
 		// Vault
 		VaultHost:     getEnv("VAULT_HOST", "localhost"),
 		VaultPort:     getEnv("VAULT_PORT", ""),
