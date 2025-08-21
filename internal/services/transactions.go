@@ -19,30 +19,28 @@ func (s *TransactionsService) GetTransactionCommission(network, currency, to str
 		return nil, err
 	}
 
-	commission, err := chainService.GetTransactionCommission(currency, to, amount)
+	res, err := chainService.GetTransactionCommission(currency, to, amount)
 	if err != nil {
 		return nil, err
 	}
 
-	return commission, nil
+	return res, nil
 }
 
 // GetTransactionStatus Get transaction status by hash
-func (s *TransactionsService) GetTransactionStatus(network, hash string) (map[string]any, error) {
+func (s *TransactionsService) GetTransactionStatus(network, hash string) (string, error) {
 	// Get chain service instance from registry
 	chainService, err := chains.GetChainService(network)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 
 	status, err := chainService.GetTransactionStatus(hash)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 
-	return map[string]any{
-		"status": status,
-	}, nil
+	return status, nil
 }
 
 // SendWithdrawal Send new withdraw to the queue and return queue_id

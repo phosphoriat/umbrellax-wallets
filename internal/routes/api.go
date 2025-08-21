@@ -8,7 +8,7 @@ import (
 )
 
 func SetupRoutes(app *fiber.App) {
-	// Init route handlers
+	// Init routes handlers
 	tokensHandler := handlers.NewTokensHandler(services.NewTokensService())
 	walletsHandler := handlers.NewWalletsHandler(services.NewWalletsService())
 	transactionsHandler := handlers.NewTransactionsHandler(services.NewTransactionsService())
@@ -16,7 +16,7 @@ func SetupRoutes(app *fiber.App) {
 	// Set api routes group
 	api := app.Group("/api")
 
-	// Health check
+	// Health check route
 	api.Get("/health", func(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{"status": "ok"})
 	})

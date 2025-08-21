@@ -1,5 +1,7 @@
 package services
 
+import "wallets/internal/services/api/bybit"
+
 type TokensService struct{}
 
 // NewTokensService Create new instance of TokensService
@@ -8,10 +10,11 @@ func NewTokensService() *TokensService {
 }
 
 // GetTokenInfo Get token info by ticker
-func (s *TokensService) GetTokenInfo(ticker string) (map[string]any, error) {
-	token := make(map[string]any)
+func (s *TokensService) GetTokenInfo(network, currency string) (map[string]any, error) {
+	res, err := bybit.GetHTTPClient().GetCoinInfo(currency, network)
+	if err != nil {
+		return nil, err
+	}
 
-	return map[string]any{
-		"token": token,
-	}, nil
+	return res, nil
 }

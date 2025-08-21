@@ -12,21 +12,19 @@ func NewWalletsService() *WalletsService {
 }
 
 // GetUserWallet Get user HD-wallet by user id
-func (s *WalletsService) GetUserWallet(userId int, network string) (map[string]any, error) {
+func (s *WalletsService) GetUserWallet(userId int, network string) (string, error) {
 	// Get chain service instance from registry
 	chainService, err := chains.GetChainService(network)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 
-	address, err := chainService.GetUserWallet(userId, nil)
+	address, err := chainService.GetUserWallet(userId)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 
-	return map[string]any{
-		"address": address,
-	}, nil
+	return address, nil
 }
 
 // GetMasterWallet Get master wallet info by network
@@ -37,12 +35,10 @@ func (s *WalletsService) GetMasterWallet(network string) (map[string]any, error)
 		return nil, err
 	}
 
-	wallet, err := chainService.GetMasterWallet()
+	res, err := chainService.GetMasterWallet()
 	if err != nil {
 		return nil, err
 	}
 
-	return map[string]any{
-		"wallet": wallet,
-	}, nil
+	return res, nil
 }

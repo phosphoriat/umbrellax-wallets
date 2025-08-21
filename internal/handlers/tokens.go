@@ -15,7 +15,8 @@ type (
 
 	// GetTokenInfoQuery validation rules
 	GetTokenInfoQuery struct {
-		Ticker string `validate:"required,oneof=UMBRELLA USDT ETH TON BTC SOL"`
+		Network  string `validate:"required,oneof=tron ethereum bsc ton bitcoin solana"`
+		Currency string `validate:"required,oneof=UMBRELLA USDT ETH TON BTC SOL"`
 	}
 )
 
@@ -28,16 +29,17 @@ func NewTokensHandler(service *services.TokensService) *TokensHandler {
 // GET /api/tokens/:ticker
 func (h *TokensHandler) GetTokenInfo(c *fiber.Ctx) error {
 	params := &GetTokenInfoQuery{
-		Ticker: c.Params("ticker"),
+		Network:  c.Query("network"),
+		Currency: c.Query("currency"),
 	}
 
 	if err := middleware.ValidateStruct(params); err != nil {
 		return c.JSON(err)
 	}
 
-	res, err := h.service.GetTokenInfo(params.Ticker)
+	res, err := h.service.GetTokenInfo(params.Network, params.Currency)
 	if err != nil {
 		return c.JSON(err)
 	}
-	return c.JSON(fiber.Map{"token": res})
+	return c.JSON(fiber.Map{"info": res})
 }

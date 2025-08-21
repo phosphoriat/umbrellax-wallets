@@ -30,6 +30,7 @@ func main() {
 		log.Fatal("Failed to load config.")
 	}
 
+	/* Init services */
 	// Init PostgreSQL and apply auto-migrations once, if needed
 	if err := pgsql.Init(cfg); err != nil {
 		log.Fatal("Failed to initialize PostgreSQL:", err)
@@ -48,16 +49,13 @@ func main() {
 	}
 	defer redis.Close()
 
-	/* Init services */
 	// Init Bybit service
 	bybit.Init(cfg)
-	// Init Bybit websocket wallet stream
-	bybit.InitWalletStream(cfg)
 
 	// Init scheduler
 	scheduler.Init()
 
-	// Create app instance
+	/* Create app instance */
 	app := fiber.New(fiber.Config{
 		ErrorHandler: func(c *fiber.Ctx, err error) error {
 			code := fiber.StatusInternalServerError
@@ -90,10 +88,11 @@ func main() {
 	// Recover middleware
 	app.Use(recover.New())
 
-	// Define API routes
+	/* Define routes */
 	routes.SetupRoutes(app)
 
-	// Server address
+	/* Start HTTP server */
+	// Get server address and port from config
 	address := fmt.Sprintf("%s:%s", cfg.AppUrl, cfg.AppPort)
 	// Start HTTP server in goroutine for graceful shutdown
 	go func() {
@@ -103,18 +102,16 @@ func main() {
 		}
 	}()
 
-	// Server graceful shutdown
-	gracefulShutdown(app)
+	// Set server graceful shutdown
+	ServerGracefulShutdown(app)
 }
 
-// gracefulShutdown Graceful server shutdown
-func gracefulShutdown(app *fiber.App) {
+// ServerGracefulShutdown Set server graceful shutdown
+func ServerGracefulShutdown(app *fiber.App) {
 	// Create channel to signify a signal being sent
 	c := make(chan os.Signal, 1)
-
 	// When an interrupt or termination signal is sent, notify the channel
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-
 	// This blocks the main thread until an interrupt is received
 	<-c
 	log.Println("Gracefully shutting down...")
