@@ -49,8 +49,8 @@ func (sol *Solana) GetCode() string {
 	return sol.NetworkCode
 }
 
-// GetUserWallet Get user HD-wallet by user id and prefix
-func (sol *Solana) GetUserWallet(userId int, prefix *string) (string, error) {
+// GetUserWallet Get user HD-wallet by user id
+func (sol *Solana) GetUserWallet(userId int) (string, error) {
 
 }
 

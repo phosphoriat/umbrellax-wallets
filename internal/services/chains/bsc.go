@@ -54,8 +54,8 @@ func (bsc *Bsc) GetCode() string {
 	return bsc.NetworkCode
 }
 
-// GetUserWallet Get user HD-wallet by user id and prefix
-func (bsc *Bsc) GetUserWallet(userId int, prefix *string) (string, error) {
+// GetUserWallet Get user HD-wallet by user id
+func (bsc *Bsc) GetUserWallet(userId int) (string, error) {
 
 }
 

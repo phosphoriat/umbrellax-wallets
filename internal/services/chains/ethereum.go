@@ -54,8 +54,8 @@ func (eth *Ethereum) GetCode() string {
 	return eth.NetworkCode
 }
 
-// GetUserWallet Get user HD-wallet by user id and prefix
-func (eth *Ethereum) GetUserWallet(userId int, prefix *string) (string, error) {
+// GetUserWallet Get user HD-wallet by user id
+func (eth *Ethereum) GetUserWallet(userId int) (string, error) {
 
 }
 

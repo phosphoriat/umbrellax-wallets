@@ -61,8 +61,8 @@ func (btc *Bitcoin) GetCode() string {
 	return btc.NetworkCode
 }
 
-// GetUserWallet Get user HD-wallet by user id and prefix
-func (btc *Bitcoin) GetUserWallet(userId int, prefix *string) (string, error) {
+// GetUserWallet Get user HD-wallet by user id
+func (btc *Bitcoin) GetUserWallet(userId int) (string, error) {
 
 }
 

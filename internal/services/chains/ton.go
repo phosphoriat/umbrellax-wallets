@@ -45,8 +45,8 @@ func (ton *Ton) GetCode() string {
 	return ton.NetworkCode
 }
 
-// GetUserWallet Get user HD-wallet by user id and prefix
-func (ton *Ton) GetUserWallet(userId int, prefix *string) (string, error) {
+// GetUserWallet Get user HD-wallet by user id
+func (ton *Ton) GetUserWallet(userId int) (string, error) {
 
 }
 

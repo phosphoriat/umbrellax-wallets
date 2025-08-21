@@ -95,8 +95,8 @@ func (c *HTTPClient) GetCoinInfo(coin, network string) (map[string]any, error) {
 	return nil, fmt.Errorf("invalid response format")
 }
 
-// @private getWithdrawalFee Get withdrawal fee for coin in network
-func (c *HTTPClient) getWithdrawalFee(coin, network string) (float64, error) {
+// GetWithdrawalFee Get withdrawal fee for coin in network
+func (c *HTTPClient) GetWithdrawalFee(coin, network string) (float64, error) {
 	result, err := c.GetCoinInfo(coin, network)
 	if err != nil {
 		return 0, err
@@ -288,7 +288,7 @@ func (c *HTTPClient) CreateWithdraw(coin, chain string, amount float64) (string,
 	return "", fmt.Errorf("invalid response format")
 }
 
-// CreateInternalTransfer Create internal account transfer (fe from FUND to UNIFIED)
+// CreateInternalTransfer Create internal account transfer (f.e. from FUND to UNIFIED)
 // @docs https://bybit-exchange.github.io/docs/v5/asset/transfer/create-inter-transfer
 func (c *HTTPClient) CreateInternalTransfer(coin, amount, fromAccountType, toAccountType string) (int, error) {
 	params := map[string]any{

@@ -15,13 +15,14 @@ type (
 	// BaseChainService Common fields struct for all chains
 	BaseChainService struct {
 		NetworkCode string
+		NativeToken string
 		AmlTokenId  string
 	}
 
 	// ChainService Interface with all chain methods
 	ChainService interface {
 		GetCode() string
-		GetUserWallet(userId int, prefix *string) (string, error)
+		GetUserWallet(userId int) (string, error)
 		GetMasterWallet() (map[string]any, error)
 		GetTransactionCommission(currency, to string, amount float64) (map[string]any, error)
 		GetTransactionStatus(hash string) (string, error)
@@ -31,6 +32,10 @@ type (
 )
 
 // CreateWithdrawRequest Put new withdraw request in the queue and return queue_id
+// currency: Token ticker
+// network: Network code
+// address: Withdrawal address
+// amount: Amount in float value
 func CreateWithdrawRequest(currency, network, address string, amount float64) (map[string]any, error) {
 	// Load config
 	cfg := config.Load()

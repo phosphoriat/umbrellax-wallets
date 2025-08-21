@@ -24,9 +24,7 @@ func (s *TransactionsService) GetTransactionCommission(network, currency, to str
 		return nil, err
 	}
 
-	return map[string]any{
-		"commission": commission,
-	}, nil
+	return commission, nil
 }
 
 // GetTransactionStatus Get transaction status by hash

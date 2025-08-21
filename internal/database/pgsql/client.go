@@ -5,7 +5,7 @@ import (
 	"log"
 	"sync"
 	"time"
-	
+
 	"wallets/internal/config"
 	"wallets/internal/models"
 
@@ -90,25 +90,6 @@ func newPgSQLClient(cfg *config.Config) (*Client, error) {
 	}, nil
 }
 
-// @private closeConnection Close PostgreSQL connection
-func (c *Client) closeConnection() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.db != nil {
-		sqlDB, err := c.db.DB()
-		if err != nil {
-			return err
-		}
-
-		err = sqlDB.Close()
-		c.db = nil
-		return err
-	}
-
-	return nil
-}
-
 // RunPgSQLMigrations Apply auto-migrations once, if needed
 func RunPgSQLMigrations() error {
 	if clientInstance == nil {
@@ -138,6 +119,25 @@ func RunPgSQLMigrations() error {
 		} else {
 			log.Printf("%s table already exists, skipping migration", m.name)
 		}
+	}
+
+	return nil
+}
+
+// @private closeConnection Close PostgreSQL connection
+func (c *Client) closeConnection() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.db != nil {
+		sqlDB, err := c.db.DB()
+		if err != nil {
+			return err
+		}
+
+		err = sqlDB.Close()
+		c.db = nil
+		return err
 	}
 
 	return nil

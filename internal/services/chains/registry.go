@@ -11,6 +11,7 @@ type ServiceRegistry struct {
 	mu       sync.RWMutex
 }
 
+// registry Global ServiceRegistry instance
 var registry = &ServiceRegistry{
 	services: make(map[string]func() ChainService),
 }
@@ -48,7 +49,7 @@ func GetAvailableNetworks() []string {
 	return networks
 }
 
-// init Register chain services (when package will import in main.go)
+// init Register chain services (will auto-exec, when package imports in main.go)
 func init() {
 	RegisterChainService("tron", func() ChainService { return GetTron() })
 	RegisterChainService("ethereum", func() ChainService { return GetEthereum() })
