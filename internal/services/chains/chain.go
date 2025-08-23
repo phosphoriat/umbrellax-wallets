@@ -24,9 +24,9 @@ type (
 		GetCode() string
 		GetUserWallet(userId int) (string, error)
 		GetMasterWallet() (map[string]any, error)
-		GetTransactionCommission(currency, to string, amount float64) (map[string]any, error)
-		GetTransactionStatus(hash string) (string, error)
-		SendTransaction(currency, to string, amount float64) (map[string]any, error)
+		GetTransactionCommission(currency, to string, amount float64, memo string) (map[string]any, error)
+		GetTransactionStatus(hash, toAddr string) (string, error)
+		SendTransaction(currency, to string, amount float64, memo string) (map[string]any, error)
 		ProcessInboundTransactions()
 	}
 )
@@ -36,9 +36,10 @@ type (
 // network: Network code
 // address: Withdrawal address
 // amount: Amount in float value
-func CreateWithdrawRequest(currency, network, address string, amount float64) (map[string]any, error) {
+// memo: Memo tag (for TON only)
+func CreateWithdrawRequest(currency, network, address string, amount float64, memo string) (map[string]any, error) {
 	// Load config
-	cfg := config.Load()
+	cfg, _ := config.Load()
 
 	// Get withdraw request to master wallet item encoded in JSON
 	reqItem, err := json.Marshal(map[string]any{
@@ -46,6 +47,7 @@ func CreateWithdrawRequest(currency, network, address string, amount float64) (m
 		"network":  network,
 		"address":  address,
 		"amount":   amount,
+		"memo":     memo,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal withdraw request item: %w", err)

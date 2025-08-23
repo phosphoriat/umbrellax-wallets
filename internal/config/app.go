@@ -61,6 +61,7 @@ type Config struct {
 	TronRpcUrl string
 	EthRpcUrl  string
 	BscRrcUrl  string
+	TonRpcUrl  string
 	BtcRpcUrl  string
 	SolRpcUrl  string
 	// Tatum
@@ -69,11 +70,11 @@ type Config struct {
 }
 
 // Load config from env and return Config struct
-func Load() *Config {
+func Load() (*Config, error) {
 	// Read env file and load into ENV for this process
 	err := godotenv.Load()
 	if err != nil {
-		return nil
+		return nil, err
 	}
 
 	return &Config{
@@ -129,12 +130,13 @@ func Load() *Config {
 		TronRpcUrl: getEnv("TRON_RPC_URL", ""),
 		EthRpcUrl:  getEnv("ETH_RPC_URL", ""),
 		BscRrcUrl:  getEnv("BSC_RRC_URL", ""),
+		TonRpcUrl:  getEnv("TON_RPC_URL", ""),
 		BtcRpcUrl:  getEnv("BTC_RPC_URL", ""),
 		SolRpcUrl:  getEnv("SOL_RPC_URL", ""),
 		// Tatum
 		TatumApiKey:  getEnv("TATUM_API_KEY", ""),
 		TatumWebhook: getEnv("TATUM_WEBHOOK", ""),
-	}
+	}, nil
 }
 
 // getEnv Get string value of the env variable named by the key

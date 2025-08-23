@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 
+	"wallets/internal/validation"
+
 	"github.com/go-playground/validator/v10"
 	"github.com/gofiber/fiber/v2"
 )
@@ -44,8 +46,12 @@ func (v XValidator) Validate(data interface{}) []ErrorResponse {
 	return validationErrors
 }
 
-// NewValidator Crate new validator entity
+// NewValidator Crate new validator instance
 func NewValidator() *XValidator {
+	_ = validate.RegisterValidation("network", validation.NetworkValidator)
+	_ = validate.RegisterValidation("currency", validation.CurrencyValidator)
+	_ = validate.RegisterValidation("address", validation.AddressValidator)
+
 	return &XValidator{
 		validator: validate,
 	}

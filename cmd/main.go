@@ -25,9 +25,9 @@ import (
 
 func main() {
 	// Load config
-	cfg := config.Load()
-	if cfg == nil {
-		log.Fatal("Failed to load config.")
+	cfg, err := config.Load()
+	if err == nil {
+		log.Fatal("Failed to load config from env")
 	}
 
 	/* Init services */

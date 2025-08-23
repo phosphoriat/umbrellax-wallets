@@ -15,8 +15,8 @@ type (
 
 	// GetTokenInfoQuery validation rules
 	GetTokenInfoQuery struct {
-		Network  string `validate:"required,oneof=tron ethereum bsc ton bitcoin solana"`
-		Currency string `validate:"required,oneof=UMBRELLA USDT ETH TON BTC SOL"`
+		Network  string `validate:"required,network"`
+		Currency string `validate:"required,currency"`
 	}
 )
 

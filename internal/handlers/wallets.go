@@ -15,12 +15,12 @@ type (
 
 	// GetUserWalletQuery validation rules
 	GetUserWalletQuery struct {
-		Network string `validate:"required,oneof=tron ethereum bsc ton bitcoin solana"`
+		Network string `validate:"required,network"`
 		UserId  int    `validate:"required,integer"`
 	}
 	// GetMasterWalletQuery validation rules
 	GetMasterWalletQuery struct {
-		Network string `validate:"required,oneof=tron ethereum bsc ton bitcoin solana"`
+		Network string `validate:"required,network"`
 	}
 )
 

@@ -1,6 +1,15 @@
 package config
 
-import "fmt"
+import (
+	"fmt"
+	"reflect"
+
+	"wallets/internal/utils"
+)
+
+type ChainSettingValue interface {
+	~int | ~int64 | ~float64 | ~string
+}
 
 // ContractsAddresses Blockchain smart contract addresses list for every token
 var ContractsAddresses = map[string]any{
@@ -68,8 +77,10 @@ var NetworkSettings = map[string]any{
 	"tron": map[string]any{
 		"native_token": "TRX",
 		"aml_token_id": "",
+		"max_fee":      0.02,
 	},
 	"ethereum": map[string]any{
+		"abi":          "[{\"inputs\":[{\"internalType\":\"address\",\"name\":\"owner\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"spender\",\"type\":\"address\"}],\"name\":\"allowance\",\"outputs\":[{\"internalType\":\"uint256\",\"name\":\"\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"spender\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"}],\"name\":\"approve\",\"outputs\":[{\"internalType\":\"bool\",\"name\":\"\",\"type\":\"bool\"}],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"account\",\"type\":\"address\"}],\"name\":\"balanceOf\",\"outputs\":[{\"internalType\":\"uint256\",\"name\":\"\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"decimals\",\"outputs\":[{\"internalType\":\"uint8\",\"name\":\"\",\"type\":\"uint8\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"name\",\"outputs\":[{\"internalType\":\"string\",\"name\":\"\",\"type\":\"string\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"symbol\",\"outputs\":[{\"internalType\":\"string\",\"name\":\"\",\"type\":\"string\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"totalSupply\",\"outputs\":[{\"internalType\":\"uint256\",\"name\":\"\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"recipient\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"}],\"name\":\"transfer\",\"outputs\":[{\"internalType\":\"bool\",\"name\":\"\",\"type\":\"bool\"}],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"sender\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"recipient\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"}],\"name\":\"transferFrom\",\"outputs\":[{\"internalType\":\"bool\",\"name\":\"\",\"type\":\"bool\"}],\"stateMutability\":\"nonpayable\",\"type\":\"function\"}]",
 		"native_token": "ETH",
 		"aml_token_id": "",
 		"max_fee":      0.1,
@@ -77,18 +88,22 @@ var NetworkSettings = map[string]any{
 	"bsc": map[string]any{
 		"native_token": "BNB",
 		"aml_token_id": "",
+		"max_fee":      0.05,
 	},
 	"ton": map[string]any{
 		"native_token": "TON",
 		"aml_token_id": "",
+		"max_fee":      0.01,
 	},
 	"bitcoin": map[string]any{
 		"native_token": "BTC",
 		"aml_token_id": "",
+		"max_fee":      0.0005,
 	},
 	"solana": map[string]any{
 		"native_token": "SOL",
 		"aml_token_id": "",
+		"max_fee":      0.03,
 	},
 }
 
@@ -107,7 +122,7 @@ var TokenSettings = map[string]any{
 	},
 	"ethereum": map[string]any{
 		"ETH": map[string]any{
-			"decimals":         6,
+			"decimals":         18,
 			"min_merge_amount": 0.01,
 		},
 		"USDT": map[string]any{
@@ -116,7 +131,7 @@ var TokenSettings = map[string]any{
 	},
 	"bsc": map[string]any{
 		"BNB": map[string]any{
-			"decimals":         6,
+			"decimals":         18,
 			"min_merge_amount": 0.1,
 		},
 		"USDT": map[string]any{
@@ -128,7 +143,7 @@ var TokenSettings = map[string]any{
 	},
 	"ton": map[string]any{
 		"TON": map[string]any{
-			"decimals":         6,
+			"decimals":         9,
 			"min_merge_amount": 0.5,
 		},
 		"USDT": map[string]any{
@@ -137,13 +152,13 @@ var TokenSettings = map[string]any{
 	},
 	"bitcoin": map[string]any{
 		"BTC": map[string]any{
-			"decimals":         6,
+			"decimals":         8,
 			"min_merge_amount": 0.001,
 		},
 	},
 	"solana": map[string]any{
 		"SOL": map[string]any{
-			"decimals":         6,
+			"decimals":         9,
 			"min_merge_amount": 0.1,
 		},
 	},
@@ -151,40 +166,19 @@ var TokenSettings = map[string]any{
 
 // GetChainSetting Get chain setting from config
 // config: Config interface
-// networkCode: Network code
-// tokenTicker: Token ticker
-// key: Setting key to get
-func GetChainSetting[T int64 | float64 | string](config map[string]any, networkCode, tokenTicker, key string) (T, error) {
+// path: Path in dot notation
+// Returns: Config value from given path
+func GetChainSetting[T ChainSettingValue](config map[string]any, path string) (T, error) {
 	var zero T
 
-	network, ok := config[networkCode].(map[string]any)
-	if !ok {
-		return zero, fmt.Errorf("network '%s' not found or invalid type", networkCode)
-	}
-	token, exists := network[tokenTicker]
-	if !exists {
-		return zero, fmt.Errorf("token '%s' not found in network '%s'", tokenTicker, networkCode)
-	}
-
-	if key == "" {
-		if result, ok := token.(T); ok {
+	if value, ok := utils.DataGet(config, path); ok {
+		if result, ok := value.(T); ok {
 			return result, nil
+		} else {
+			return zero, fmt.Errorf("value at path %s has type %T, expected %s",
+				path, value, reflect.TypeOf(zero).String())
 		}
-		return zero, fmt.Errorf("token '%s' has type %T, expected %T", tokenTicker, token, zero)
+	} else {
+		return zero, fmt.Errorf("value at path %s does not exist", path)
 	}
-
-	tokenMap, ok := token.(map[string]any)
-	if !ok {
-		return zero, fmt.Errorf("token '%s' is not a map, cannot access key '%s'", tokenTicker, key)
-	}
-	value, exists := tokenMap[key]
-	if !exists {
-		return zero, fmt.Errorf("key '%s' not found in token '%s'", key, tokenTicker)
-	}
-	if result, ok := value.(T); ok {
-		return result, nil
-	}
-
-	return zero, fmt.Errorf("value at '%s.%s.%s' has type %T, expected %T",
-		networkCode, tokenTicker, key, value, zero)
 }

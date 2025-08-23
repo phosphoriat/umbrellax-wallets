@@ -101,9 +101,9 @@ func InitWalletStream(cfg *config.Config) {
 	// Waiting for termination signal
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt)
+	<-interrupt
 
 	// Close connection
-	<-interrupt
 	if err := client.Close(); err != nil {
 		log.Printf("Close connection error: %v", err)
 	}
@@ -138,6 +138,7 @@ func (ws *WSClient) Connect() error {
 
 	// Start handle messages
 	go ws.messageHandler()
+	// Start ping handler
 	go ws.pingHandler()
 
 	return nil
@@ -157,9 +158,9 @@ func (ws *WSClient) Close() error {
 	return nil
 }
 
-// @private pingHandler Send ping messages to maintain the connection
+// @private pingHandler Send ping messages every 30 seconds to maintain the connection
 func (ws *WSClient) pingHandler() {
-	ticker := time.NewTicker(20 * time.Second)
+	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -240,7 +241,7 @@ func (ws *WSClient) sendMessage(msg interface{}) error {
 func (ws *WSClient) messageHandler() {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("Error in messageHandler: %v", r)
+			log.Printf("Error in message handler: %v", r)
 		}
 	}()
 
@@ -305,8 +306,9 @@ func (ws *WSClient) processMessage(message []byte) {
 		log.Println("Get pong message")
 
 	default:
-		// Check, if its wallet topic
+		// Check, if it has wallet topic
 		if wsResp.Topic == "wallet" {
+			// Handle wallet message data: Transfer funds from FUND to UNIFIED account
 			ws.handleWalletData(message)
 		} else {
 			log.Printf("Unknown message type: %+v", wsResp)
@@ -314,27 +316,27 @@ func (ws *WSClient) processMessage(message []byte) {
 	}
 }
 
-// @private handleWalletData Handle wallet data
-// Transfer funds from UNIFIED to FUND account
+// @private handleWalletData Transfer funds from FUND to UNIFIED account
 func (ws *WSClient) handleWalletData(message []byte) {
 	var walletResp WalletResponse
 	if err := json.Unmarshal(message, &walletResp); err != nil {
 		fmt.Printf("Parse wallet data error: %v", err)
+		return
 	}
 
 	for _, data := range walletResp.Data {
 		for _, coin := range data.Coin {
-			if data.AccountType != "UNIFIED" {
+			if data.AccountType != "FUND" {
 				continue
 			}
 
-			_, err := ws.httpClient.CreateInternalTransfer(coin.Coin, coin.Free, "UNIFIED", "FUND")
+			_, err := ws.httpClient.CreateInternalTransfer(coin.Coin, coin.Free, "FUND", "UNIFIED")
 			if err != nil {
-				fmt.Printf("Error transferring %s %s from UNIFIED to FUND: %v\n",
-					coin.Equity, coin.Coin, err)
+				fmt.Printf("Error transferring %s %s from FUND to UNIFIED: %v\n",
+					coin.Free, coin.Coin, err)
 			} else {
-				fmt.Printf("Successfully transferred %s %s from UNIFIED to FUND\n",
-					coin.Equity, coin.Coin)
+				fmt.Printf("Successfully transferred %s %s from FUND to UNIFIED\n",
+					coin.Free, coin.Coin)
 			}
 		}
 	}
