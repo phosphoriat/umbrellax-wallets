@@ -19,7 +19,7 @@ func (s *TransactionsService) GetTransactionCommission(network, currency, to str
 		return nil, err
 	}
 
-	res, err := chainService.GetTransactionCommission(currency, to, amount, memo)
+	res, err := chainService.GetTransactionCommission("master", nil, currency, to, amount, memo)
 	if err != nil {
 		return nil, err
 	}

@@ -1,21 +1,20 @@
 package clickhouse
 
 import (
-	"context"
 	"fmt"
-	"log"
 	"sync"
+	"time"
 
 	"wallets/internal/config"
 
-	"github.com/ClickHouse/clickhouse-go/v2"
-	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	"gorm.io/driver/clickhouse"
+	"gorm.io/gorm"
 )
 
 // Client ClickHouse connection struct
 type Client struct {
-	conn driver.Conn
-	mu   sync.RWMutex
+	db *gorm.DB
+	mu sync.RWMutex
 }
 
 // Global package vars
@@ -24,12 +23,12 @@ var (
 	once           sync.Once
 )
 
-// GetClient Get ClickHouse connection instance
-func GetClient() driver.Conn {
+// GetDB Get global ClickHouse Client instance
+func GetDB() *gorm.DB {
 	if clientInstance == nil {
 		return nil
 	}
-	return clientInstance.conn
+	return clientInstance.db
 }
 
 // Init ClickHouse connection (singleton)
@@ -49,31 +48,38 @@ func Close() error {
 	return clientInstance.closeConnection()
 }
 
-// @private newClickHouseClient Create new ClickHouse Client instance
+// @private newClickHouseClient Create new ClickHouse Client instance (private constructor)
 func newClickHouseClient(cfg *config.Config) (*Client, error) {
-	// Establish connection
-	conn, err := clickhouse.Open(&clickhouse.Options{
-		Addr: []string{fmt.Sprintf("%s:%s", cfg.ClickhouseHost, cfg.ClickhousePort)},
-		Auth: clickhouse.Auth{
-			Database: cfg.ClickhouseName,
-			Username: cfg.ClickhouseUser,
-			Password: cfg.ClickhousePassword,
-		},
-	})
+	// Form DSN ClickHouse connection configuration string
+	dsn := fmt.Sprintf("tcp://%s:%s?database=%s&username=%s&password=%s&read_timeout=10&write_timeout=20",
+		cfg.DbHost, cfg.DbPort, cfg.DbName, cfg.DbUser, cfg.DbPassword)
+
+	// Open ClickHouse connection
+	db, err := gorm.Open(clickhouse.Open(dsn), &gorm.Config{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to ClickHouse: %w", err)
 	}
 
-	// Test connection
-	if err := conn.Ping(context.Background()); err != nil {
-		return nil, fmt.Errorf("failed to ping ClickHouse: %w", err)
+	// Get GORM DB definition
+	sqlDb, err := db.DB()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get underlying sql.DB: %w", err)
 	}
 
-	log.Printf("ClickHouse connection established: %s@%s:%s/%s",
-		cfg.ClickhouseUser, cfg.ClickhouseHost, cfg.ClickhousePort, cfg.ClickhouseName)
+	// Set ClickHouse connection pool settings
+	sqlDb.SetMaxIdleConns(5)
+	sqlDb.SetMaxOpenConns(25)
+	sqlDb.SetConnMaxLifetime(5 * time.Minute)
+	sqlDb.SetConnMaxIdleTime(30 * time.Second)
+
+	// Check connection
+	if err := sqlDb.Ping(); err != nil {
+		return nil, fmt.Errorf("failed to ping ClickHouse: %w", err)
+	}
+	fmt.Println("ClickHouse connection established successfully")
 
 	return &Client{
-		conn: conn,
+		db: db,
 	}, nil
 }
 
@@ -82,9 +88,14 @@ func (c *Client) closeConnection() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.conn != nil {
-		err := c.conn.Close()
-		c.conn = nil
+	if c.db != nil {
+		sqlDB, err := c.db.DB()
+		if err != nil {
+			return err
+		}
+
+		err = sqlDB.Close()
+		c.db = nil
 		return err
 	}
 

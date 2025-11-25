@@ -8,13 +8,13 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
-	"wallets/internal/scheduler"
 
 	"wallets/internal/config"
-	"wallets/internal/database/pgsql"
+	"wallets/internal/database/clickhouse"
 	"wallets/internal/database/redis"
 	"wallets/internal/database/vault"
 	"wallets/internal/routes"
+	"wallets/internal/scheduler"
 	"wallets/internal/services/api/bybit"
 	_ "wallets/internal/services/chains"
 
@@ -31,11 +31,11 @@ func main() {
 	}
 
 	/* Init services */
-	// Init PostgreSQL and apply auto-migrations once, if needed
-	if err := pgsql.Init(cfg); err != nil {
-		log.Fatal("Failed to initialize PostgreSQL:", err)
+	// Init ClickHouse
+	if err := clickhouse.Init(cfg); err != nil {
+		log.Fatal("Failed to initialize ClickHouse:", err)
 	}
-	defer pgsql.Close()
+	defer clickhouse.Close()
 
 	// Init Vault
 	if err := vault.Init(cfg); err != nil {

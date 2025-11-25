@@ -38,12 +38,6 @@ func GetHTTPClient() *HTTPClient {
 func Init(cfg *config.Config) {
 	once.Do(func() {
 		clientInstance = newHTTPClient(cfg)
-
-		// Set deposit account type to UNIFIED
-		_, err := clientInstance.SetDepositAccount("UNIFIED")
-		if err != nil {
-			return
-		}
 	})
 }
 
@@ -55,7 +49,8 @@ func newHTTPClient(cfg *config.Config) *HTTPClient {
 	}
 }
 
-// GetCoinInfo Get coin info for network
+// GetCoinInfo
+// Get coin info for network
 // @docs https://bybit-exchange.github.io/docs/v5/asset/coin-info
 func (c *HTTPClient) GetCoinInfo(coin, network string) (map[string]any, error) {
 	resultMap, err := c.sendRequest(map[string]any{"coin": coin}, "GetCoinInfo")
@@ -87,7 +82,8 @@ func (c *HTTPClient) GetCoinInfo(coin, network string) (map[string]any, error) {
 	return nil, fmt.Errorf("network '%s' not found for coin '%s'", network, coin)
 }
 
-// GetWithdrawalFee Get withdrawal fee for coin in network
+// GetWithdrawalFee
+// Get withdrawal fee for coin in network (in coin value)
 func (c *HTTPClient) GetWithdrawalFee(coin, network string) (float64, error) {
 	result, err := c.GetCoinInfo(coin, network)
 	if err != nil {
@@ -105,7 +101,8 @@ func (c *HTTPClient) GetWithdrawalFee(coin, network string) (float64, error) {
 	return 0, fmt.Errorf("withdrawal fee not found for coin '%s' on network '%s'", coin, network)
 }
 
-// @private getMinWithdrawalAmount Get min withdrawal amount for coin in network
+// @private getMinWithdrawalAmount
+// Get min withdrawal amount for coin in network
 func (c *HTTPClient) getMinWithdrawalAmount(coin, network string) (float64, error) {
 	result, err := c.GetCoinInfo(coin, network)
 	if err != nil {
@@ -123,7 +120,8 @@ func (c *HTTPClient) getMinWithdrawalAmount(coin, network string) (float64, erro
 	return 0, fmt.Errorf("min withdrawal amount not found for coin '%s' on network '%s'", coin, network)
 }
 
-// GetMasterWalletAddress Get master wallet address
+// GetMasterWalletAddress
+// Get master wallet address
 // @docs https://bybit-exchange.github.io/docs/v5/asset/deposit/master-deposit-addr
 func (c *HTTPClient) GetMasterWalletAddress(coin, network string) (string, error) {
 	resultMap, err := c.sendRequest(map[string]any{
@@ -151,23 +149,8 @@ func (c *HTTPClient) GetMasterWalletAddress(coin, network string) (string, error
 	return "", fmt.Errorf("deposit address for coin '%s' on network '%s' not found", coin, network)
 }
 
-// SetDepositAccount Set deposit account type
-// @docs https://bybit-exchange.github.io/docs/v5/asset/deposit/set-deposit-acct
-func (c *HTTPClient) SetDepositAccount(accountType string) (bool, error) {
-	resultMap, err := c.sendRequest(map[string]any{
-		"accountType": accountType,
-	}, "SetDepositAccount")
-	if err != nil {
-		return false, err
-	}
-
-	if status, _ := utils.DataGet(resultMap, "status"); status == 1 {
-		return true, nil
-	}
-	return false, fmt.Errorf("invalid response format")
-}
-
-// GetWalletBalance Get wallet balance
+// GetWalletBalance
+// Get wallet balance
 // @docs https://bybit-exchange.github.io/docs/v5/account/wallet-balance
 func (c *HTTPClient) GetWalletBalance(coin, accountType string) (float64, error) {
 	resultMap, err := c.sendRequest(map[string]any{
@@ -195,7 +178,8 @@ func (c *HTTPClient) GetWalletBalance(coin, accountType string) (float64, error)
 	return 0, fmt.Errorf("coin '%s' not found", coin)
 }
 
-// GetWithdrawalRecords Get withdrawal records
+// GetWithdrawalRecords
+// Get withdrawal records
 // @docs https://bybit-exchange.github.io/docs/v5/asset/withdraw/withdraw-record
 func (c *HTTPClient) GetWithdrawalRecords(params map[string]any) ([]any, error) {
 	resultMap, err := c.sendRequest(params, "GetWithdrawalRecords")
@@ -209,7 +193,8 @@ func (c *HTTPClient) GetWithdrawalRecords(params map[string]any) ([]any, error) 
 	return nil, fmt.Errorf("invalid response format")
 }
 
-// CreateWithdraw Create new withdraw from bybit to master wallet and return withdraw id
+// CreateWithdraw
+// Create new withdraw from bybit to master wallet and return bybit withdraw id
 // Withdrawals can be only from FUND account type
 // @docs https://bybit-exchange.github.io/docs/v5/asset/withdraw
 func (c *HTTPClient) CreateWithdraw(coin, chain string, amount float64) (string, error) {
@@ -230,18 +215,11 @@ func (c *HTTPClient) CreateWithdraw(coin, chain string, amount float64) (string,
 		return "", fmt.Errorf("amount is less than the min withdrawal amount")
 	}
 
-	// Get UNIFIED wallet balance for coin
-	walletBalance, err := c.GetWalletBalance(coin, "FUND")
+	// Transfer needed amount from UNIFIED to FUND balance to withdraw
+	_, err = c.CreateInternalTransfer(coin, strconv.FormatFloat(amount, 'g', -1, 64), "UNIFIED", "FUND")
 	if err != nil {
-		return "", fmt.Errorf("failed to get wallet balance: %w", err)
+		return "", fmt.Errorf("failed to create internal transfer: %w", err)
 	}
-
-	// Check UNIFIED wallet balance and return error, if not enough amount
-	if walletBalance < amount {
-		return "", fmt.Errorf("not enough UNIFIED balance amount to withdraw. Needed %f, but %f available", amount, walletBalance)
-	}
-
-	// @TODO Transfer needed withdrawal amount from UNIFIED to FUND balance
 
 	// Send withdraw request from FUND account to master wallet
 	resultMap, err := c.sendRequest(map[string]any{
@@ -263,7 +241,8 @@ func (c *HTTPClient) CreateWithdraw(coin, chain string, amount float64) (string,
 	return "", fmt.Errorf("invalid response format")
 }
 
-// CreateInternalTransfer Create internal account transfer (f.e. from UNIFIED to FUND)
+// CreateInternalTransfer
+// Create internal account transfer (f.e. from UNIFIED to FUND)
 // @docs https://bybit-exchange.github.io/docs/v5/asset/transfer/create-inter-transfer
 func (c *HTTPClient) CreateInternalTransfer(coin, amount, fromAccountType, toAccountType string) (int, error) {
 	resultMap, err := c.sendRequest(map[string]any{
@@ -287,7 +266,8 @@ func (c *HTTPClient) CreateInternalTransfer(coin, amount, fromAccountType, toAcc
 	return 0, fmt.Errorf("invalid response format")
 }
 
-// @private sendRequest Send request to Bybit API and return response result or error
+// @private sendRequest
+// Send request to Bybit API and return response result or error
 func (c *HTTPClient) sendRequest(params map[string]any, methodName string) (map[string]any, error) {
 	reqClient := c.bybit.NewUtaBybitServiceWithParams(params)
 

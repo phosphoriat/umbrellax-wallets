@@ -2,15 +2,19 @@ package routes
 
 import (
 	"wallets/internal/handlers"
+	"wallets/internal/repository"
 	"wallets/internal/services"
 
 	"github.com/gofiber/fiber/v2"
 )
 
 func SetupRoutes(app *fiber.App) {
+	// Init repositories
+	walletRepo := repository.NewWalletRepository()
+
 	// Init routes handlers
 	tokensHandler := handlers.NewTokensHandler(services.NewTokensService())
-	walletsHandler := handlers.NewWalletsHandler(services.NewWalletsService())
+	walletsHandler := handlers.NewWalletsHandler(services.NewWalletsService(walletRepo))
 	transactionsHandler := handlers.NewTransactionsHandler(services.NewTransactionsService())
 
 	// Set api routes group

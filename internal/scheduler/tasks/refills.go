@@ -2,6 +2,9 @@ package tasks
 
 import (
 	"context"
+	"log"
+
+	"wallets/internal/services/chains"
 )
 
 type RefillsTask struct {
@@ -19,6 +22,11 @@ func NewRefillsTask() *RefillsTask {
 }
 
 func (t *RefillsTask) Execute(ctx context.Context) error {
+	err := chains.ProcessInboundTransactions()
+	if err != nil {
+		log.Printf("Processing inbound transactions error: %v", err)
+		return nil
+	}
 
 	return nil
 }

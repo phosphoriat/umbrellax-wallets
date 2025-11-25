@@ -41,7 +41,7 @@ func (t *WithdrawalsTask) Execute(ctx context.Context) error {
 	// Get all items from hash
 	values, err := t.redis.HGetAll(ctx, t.RedisBybitWithdrawalsKey)
 	if err != nil {
-		log.Printf("Read hash error '%s': %v", t.RedisBybitWithdrawalsKey, err)
+		log.Printf("Withdrawals hash read error '%s': %v", t.RedisBybitWithdrawalsKey, err)
 		return nil
 	}
 
@@ -49,7 +49,7 @@ func (t *WithdrawalsTask) Execute(ctx context.Context) error {
 	for key, value := range values {
 		err = t.processItem(ctx, key, value)
 		if err != nil {
-			log.Printf("Process item error: %v", err)
+			log.Printf("Withdrawals item processing error: %v", err)
 		}
 
 		// Delete item from bybit withdrawals Redis hash
@@ -68,30 +68,18 @@ func (t *WithdrawalsTask) processItem(ctx context.Context, requestId, itemStr st
 		return fmt.Errorf("failed to unmarshal bybit withdrawal tx item: %w", err)
 	}
 
-	// Check types with validation
-	bybitId, ok := item["bybit_id"].(string)
-	if !ok {
-		return fmt.Errorf("bybit withdrawal tx item: invalid bybit_id value")
-	}
-	currency, ok := item["currency"].(string)
-	if !ok {
-		return fmt.Errorf("bybit withdrawal tx item: invalid coin value")
-	}
-	network, ok := item["network"].(string)
-	if !ok {
-		return fmt.Errorf("bybit withdrawal tx item: invalid network value")
-	}
-	to, ok := item["to"].(string)
-	if !ok {
-		return fmt.Errorf("bybit withdrawal tx item: invalid amount value")
-	}
-	amount, ok := item["amount"].(float64)
-	if !ok {
-		return fmt.Errorf("bybit withdrawal tx item: invalid amount value")
-	}
-	memo, ok := item["memo"].(string)
-	if !ok {
+	// Check types assertion
+	bybitId, okB := item["bybit_id"].(string)
+	currency, okC := item["currency"].(string)
+	network, okN := item["network"].(string)
+	to, okT := item["to"].(string)
+	amount, okA := item["amount"].(float64)
+	memo, okM := item["memo"].(string)
+	if !okM {
 		memo = ""
+	}
+	if !okB || !okC || !okN || !okT || !okA {
+		return fmt.Errorf("invalid bybit withdrawal tx item data: %+v", item)
 	}
 
 	// Check bybit withdrawal tx status
@@ -111,31 +99,34 @@ func (t *WithdrawalsTask) processItem(ctx context.Context, requestId, itemStr st
 				return err
 			}
 
-			// Send chain withdraw from master wallet to address from withdraw request
-			tx, err := chainService.SendTransaction(currency, to, amount, memo)
+			// Send transaction from master wallet to address from withdraw request
+			hash, amlId, err := chainService.SendTransaction("master", nil, currency, to, amount, memo)
 			if err != nil {
 				return err
 			}
 
-			// Add transaction item in withdrawals Redis hash with pending status
+			// Set transaction item with pending status
 			txItem, _ = json.Marshal(map[string]any{
 				"bybit_id": bybitId,
 				"status":   "pending",
-				"hash":     tx["hash"].(string),
-				"aml_id":   tx["aml_id"].(string),
+				"hash":     hash,
+				"aml_id":   amlId,
 			})
 
 		} else {
-			// Add transaction item in withdrawals Redis hash with pending status
+			// Set transaction item with failed status
 			txItem, _ = json.Marshal(map[string]any{
 				"bybit_id": bybitId,
 				"status":   "failed",
 			})
 		}
 
-		// Add transaction item in withdrawals Redis hash
+		// Push transaction item in withdrawals Redis queue
 		t.redis.HSet(ctx, t.RedisWithdrawalsKey, requestId, txItem)
 
+		return nil
+
+	} else {
+		return fmt.Errorf("bybit withdrawal tx status parse error: %w", err)
 	}
-	return fmt.Errorf("parse bybit withdrawal tx status: %w", err)
 }

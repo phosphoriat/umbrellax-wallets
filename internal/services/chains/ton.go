@@ -66,7 +66,6 @@ func newTon() *Ton {
 		BaseChainService: BaseChainService{
 			NetworkCode: networkCode,
 			NativeToken: networkSettings["native_token"].(string),
-			AmlTokenId:  networkSettings["aml_token_id"].(string),
 		},
 		Client:        apiClient,
 		WalletVersion: wallet.V4R2,
@@ -226,44 +225,45 @@ func (ton *Ton) GetTransactionStatus(hash, toAddr string) (string, error) {
 // amount: Amount in float value
 // memo: Memo tag
 // Returns: Transaction hash
-func (ton *Ton) SendTransaction(currency, toAddr string, amount float64, memo string) (map[string]any, error) {
+func (ton *Ton) SendTransaction(currency, toAddr string, amount float64, memo string) (string, string, error) {
 	// Get master wallet address from Vault
 	masterData, err := vault.GetClient().GetSecret("/master/" + ton.NetworkCode)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get master data: %w", err)
+		return "", "", fmt.Errorf("failed to get master data: %w", err)
 	}
 	masterAddr, ok := masterData["address"].(string)
 	if !ok || masterAddr == "" {
-		return nil, fmt.Errorf("invalid or missing %s master address in Vault", ton.NetworkCode)
+		return "", "", fmt.Errorf("invalid or missing %s master address in Vault", ton.NetworkCode)
+	}
+
+	// AML check to address
+	amlId, riskLevel, err := aml.GetClient().CheckAddress(ton.NetworkCode, toAddr)
+	if err != nil {
+		return "", "", fmt.Errorf("AML check address '%s' at network '%s' failed: %w", toAddr, ton.NetworkCode, err)
+	}
+	// If high or severe AML risks detected, return error without sending transaction
+	if riskLevel == "high" || riskLevel == "severe" {
+		return "", amlId, fmt.Errorf("failed to send withdrawal transaction to '%s' in '%s': %s AML risk", toAddr, ton.NetworkCode, riskLevel)
 	}
 
 	// Send new transaction on chain and get transaction hash
 	var hash string
 	switch currency {
 	case "TON":
-		hash, err = ton.sendNative(masterAddr, toAddr, amount)
-
+		hash, err = ton.sendNative(masterAddr, toAddr, amount, memo)
 	default:
-		hash, err = ton.sendJetton(currency, masterAddr, toAddr, amount)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("failed to send transaction: %w", err)
+		hash, err = ton.sendJetton(currency, masterAddr, toAddr, amount, memo)
 	}
 
-	// AML Check transaction by hash and get aml id
-	amlId, err := aml.GetClient().CheckTransaction(ton.NetworkCode, ton.AmlTokenId, hash, toAddr)
 	if err != nil {
-		return nil, fmt.Errorf("failed to AML check %s %s transaction: %w", ton.NetworkCode, hash, err)
+		return "", "", fmt.Errorf("failed to send transaction: %w", err)
 	}
 
-	return map[string]any{
-		"hash":   hash,
-		"aml_id": amlId,
-	}, nil
+	return hash, amlId, nil
 }
 
-// ProcessInboundTransactions @TODO Process inbound transactions
-func (ton *Ton) ProcessInboundTransactions() {
+// GetInboundTransactions Get new inbound transactions list
+func (ton *Ton) GetInboundTransactions() ([]map[string]any, error) {
 
 }
 
@@ -536,8 +536,9 @@ func (ton *Ton) sendCalcFeeRequest(fromAddr *address.Address, extMessage *tlb.Ex
 // fromAddr: Master wallet address
 // toAddr: Address for withdrawal
 // amount: Amount in float value
+// memo: Memo tag
 // Returns: Transaction hash
-func (ton *Ton) sendNative(fromAddr, toAddr string, amount float64) (string, error) {
+func (ton *Ton) sendNative(fromAddr, toAddr string, amount float64, memo string) (string, error) {
 
 }
 
@@ -546,8 +547,9 @@ func (ton *Ton) sendNative(fromAddr, toAddr string, amount float64) (string, err
 // fromAddr: Master wallet address
 // toAddr: Address for withdrawal
 // amount: Amount in float value
+// memo: Memo tag
 // Returns: Transaction hash
-func (ton *Ton) sendJetton(currency, fromAddr, toAddr string, amount float64) (string, error) {
+func (ton *Ton) sendJetton(currency, fromAddr, toAddr string, amount float64, memo string) (string, error) {
 
 }
 

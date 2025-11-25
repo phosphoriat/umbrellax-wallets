@@ -27,7 +27,7 @@ func NewWithdrawRequestTask() *WithdrawRequestTask {
 		BaseTask: BaseTask{
 			maxRetries:  3,
 			name:        "refills",
-			description: "Process refills",
+			description: "Process withdraw requests",
 		},
 		bybit:                    bybit.GetHTTPClient(),
 		redis:                    redis.GetClient(),
@@ -72,26 +72,17 @@ func (t *WithdrawRequestTask) processItem(ctx context.Context, requestId, itemSt
 		return fmt.Errorf("failed to unmarshal bybit withdraw request item: %w", err)
 	}
 
-	// Check types with validation
-	currency, ok := item["currency"].(string)
-	if !ok {
-		return fmt.Errorf("bybit withdraw request item: invalid coin value")
-	}
-	network, ok := item["network"].(string)
-	if !ok {
-		return fmt.Errorf("bybit withdraw request item: invalid network value")
-	}
-	to, ok := item["to"].(string)
-	if !ok {
-		return fmt.Errorf("bybit withdraw request item: invalid amount value")
-	}
-	amount, ok := item["amount"].(float64)
-	if !ok {
-		return fmt.Errorf("bybit withdraw request item: invalid amount value")
-	}
-	memo, ok := item["memo"].(string)
-	if !ok {
+	// Check types assertion
+	currency, okC := item["currency"].(string)
+	network, okN := item["network"].(string)
+	to, okT := item["to"].(string)
+	amount, okA := item["amount"].(float64)
+	memo, okM := item["memo"].(string)
+	if !okM {
 		memo = ""
+	}
+	if !okC || !okN || !okT || !okA {
+		return fmt.Errorf("invalid bybit withdraw request item data: %+v", item)
 	}
 
 	// Send withdraw from bybit to master wallet

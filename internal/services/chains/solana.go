@@ -51,7 +51,6 @@ func newSolana() *Solana {
 		BaseChainService: BaseChainService{
 			NetworkCode: networkCode,
 			NativeToken: networkSettings["native_token"].(string),
-			AmlTokenId:  networkSettings["aml_token_id"].(string),
 		},
 		rpcClient: client,
 	}
@@ -96,9 +95,9 @@ func (sol *Solana) GetMasterWallet() (map[string]any, error) {
 		balances[token] = tokenBalance
 	}
 
-	// Get TON native balance
-	tonBalance, _ := sol.getNativeBalance(masterAddr)
-	balances[sol.NativeToken] = tonBalance
+	// Get SOL native balance
+	solBalance, _ := sol.getNativeBalance(masterAddr)
+	balances[sol.NativeToken] = solBalance
 
 	return map[string]any{
 		"address":  masterAddr,
@@ -119,12 +118,12 @@ func (sol *Solana) GetTransactionStatus(hash, toAddr string) (string, error) {
 }
 
 // SendTransaction Send transaction to the network
-func (sol *Solana) SendTransaction(currency, to string, amount float64, memo string) (map[string]any, error) {
+func (sol *Solana) SendTransaction(currency, to string, amount float64, memo string) (string, string, error) {
 
 }
 
-// ProcessInboundTransactions @TODO Process inbound transactions
-func (sol *Solana) ProcessInboundTransactions() {
+// GetInboundTransactions Get new inbound transactions list
+func (sol *Solana) GetInboundTransactions() ([]map[string]any, error) {
 
 }
 

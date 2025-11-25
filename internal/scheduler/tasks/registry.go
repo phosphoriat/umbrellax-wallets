@@ -63,16 +63,5 @@ func (r *TaskRegistry) initializeDefinitions() []*TaskDefinition {
 		true,
 	))
 
-	// Process auto-transfers from user wallets to master wallets (every 5 minutes)
-	definitions = append(definitions, NewTaskDefinition(
-		NewTransfersTask(),
-		TaskSchedule{
-			Type:               ScheduleTypeInterval,
-			Interval:           "5m",
-			SkipIfStillRunning: true,
-		},
-		true,
-	))
-
 	return definitions
 }

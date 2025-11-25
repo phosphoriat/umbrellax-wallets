@@ -66,7 +66,6 @@ func newBsc() *Bsc {
 		BaseChainService: BaseChainService{
 			NetworkCode: networkCode,
 			NativeToken: networkSettings["native_token"].(string),
-			AmlTokenId:  networkSettings["aml_token_id"].(string),
 		},
 		Client: bscClient,
 	}
@@ -188,15 +187,25 @@ func (bsc *Bsc) GetTransactionStatus(hash, toAddr string) (string, error) {
 // toAddr: Withdrawal to address
 // amount: Amount in float value
 // Returns: Transaction hash
-func (bsc *Bsc) SendTransaction(currency, toAddr string, amount float64, memo string) (map[string]any, error) {
+func (bsc *Bsc) SendTransaction(currency, toAddr string, amount float64, memo string) (string, string, error) {
 	// Get master wallet address from Vault
 	masterData, err := vault.GetClient().GetSecret("/master/" + bsc.NetworkCode)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get master data: %w", err)
+		return "", "", fmt.Errorf("failed to get master data: %w", err)
 	}
 	masterAddr, ok := masterData["address"].(string)
 	if !ok || masterAddr == "" {
-		return nil, fmt.Errorf("invalid or missing %s master address in Vault", bsc.NetworkCode)
+		return "", "", fmt.Errorf("invalid or missing %s master address in Vault", bsc.NetworkCode)
+	}
+
+	// AML check to address
+	amlId, riskLevel, err := aml.GetClient().CheckAddress(bsc.NetworkCode, toAddr)
+	if err != nil {
+		return "", "", fmt.Errorf("AML check address '%s' at network '%s' failed: %w", toAddr, bsc.NetworkCode, err)
+	}
+	// If high or severe AML risks detected, return error without sending transaction
+	if riskLevel == "high" || riskLevel == "severe" {
+		return "", amlId, fmt.Errorf("failed to send withdrawal transaction to '%s' in '%s': %s AML risk", toAddr, bsc.NetworkCode, riskLevel)
 	}
 
 	// Send new transaction on chain and get transaction hash
@@ -204,28 +213,19 @@ func (bsc *Bsc) SendTransaction(currency, toAddr string, amount float64, memo st
 	switch currency {
 	case "BNB":
 		hash, err = bsc.sendNative(masterAddr, toAddr, amount)
-
 	default:
 		hash, err = bsc.sendErc20(currency, masterAddr, toAddr, amount)
 	}
+
 	if err != nil {
-		return nil, fmt.Errorf("failed to send transaction: %w", err)
+		return "", "", fmt.Errorf("failed to send transaction: %w", err)
 	}
 
-	// AML Check transaction by hash and get aml id
-	amlId, err := aml.GetClient().CheckTransaction(bsc.NetworkCode, bsc.AmlTokenId, hash, toAddr)
-	if err != nil {
-		return nil, fmt.Errorf("failed to AML check %s %s transaction: %w", bsc.NetworkCode, hash, err)
-	}
-
-	return map[string]any{
-		"hash":   hash,
-		"aml_id": amlId,
-	}, nil
+	return hash, amlId, nil
 }
 
-// ProcessInboundTransactions @TODO Process inbound transactions
-func (bsc *Bsc) ProcessInboundTransactions() {
+// GetInboundTransactions Get new inbound transactions list
+func (bsc *Bsc) GetInboundTransactions() ([]map[string]any, error) {
 
 }
 

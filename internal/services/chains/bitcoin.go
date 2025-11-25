@@ -63,7 +63,6 @@ func newBitcoin() *Bitcoin {
 		BaseChainService: BaseChainService{
 			NetworkCode: networkCode,
 			NativeToken: networkSettings["native_token"].(string),
-			AmlTokenId:  networkSettings["aml_token_id"].(string),
 		},
 		Client: client,
 	}
@@ -123,12 +122,12 @@ func (btc *Bitcoin) GetTransactionStatus(hash, toAddr string) (string, error) {
 }
 
 // SendTransaction Send transaction to the network
-func (btc *Bitcoin) SendTransaction(currency, to string, amount float64, memo string) (map[string]any, error) {
+func (btc *Bitcoin) SendTransaction(currency, to string, amount float64, memo string) (string, string, error) {
 
 }
 
-// ProcessInboundTransactions @TODO Process inbound transactions
-func (btc *Bitcoin) ProcessInboundTransactions() {
+// GetInboundTransactions Get new inbound transactions list
+func (btc *Bitcoin) GetInboundTransactions() ([]map[string]any, error) {
 
 }
 

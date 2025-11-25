@@ -13,18 +13,18 @@ type Config struct {
 	AppPort         string
 	NotificatorPort string
 	// PostgreSQL
-	DbHost     string
-	DbPort     string
-	DbName     string
-	DbUser     string
-	DbPassword string
-	DbSslMode  string
+	PgSqlHost     string
+	PgSqlPort     string
+	PgSqlName     string
+	PgSqlUser     string
+	PgSqlPassword string
+	PgSqlSslMode  string
 	// ClickHouse
-	ClickhouseHost     string
-	ClickhousePort     string
-	ClickhouseName     string
-	ClickhouseUser     string
-	ClickhousePassword string
+	ClickHouseHost     string
+	ClickHousePort     string
+	ClickHouseName     string
+	ClickHouseUser     string
+	ClickHousePassword string
 	// Redis
 	RedisHost                string
 	RedisPort                string
@@ -82,18 +82,18 @@ func Load() (*Config, error) {
 		AppPort:         getEnv("APP_PORT", ""),
 		NotificatorPort: getEnv("NOTIFICATOR_PORT", ""),
 		// PostgreSQL
-		DbHost:     getEnv("DB_HOST", "localhost"),
-		DbPort:     getEnv("DB_PORT", "5432"),
-		DbName:     getEnv("DB_DATABASE", ""),
-		DbUser:     getEnv("DB_USER", ""),
-		DbPassword: getEnv("DB_PASSWORD", ""),
-		DbSslMode:  getEnv("DB_SSL_MODE", "required"),
+		PgSqlHost:     getEnv("PGSQL_HOST", "localhost"),
+		PgSqlPort:     getEnv("PGSQL_PORT", "5432"),
+		PgSqlName:     getEnv("PGSQL_DATABASE", ""),
+		PgSqlUser:     getEnv("PGSQL_USER", ""),
+		PgSqlPassword: getEnv("PGSQL_PASSWORD", ""),
+		PgSqlSslMode:  getEnv("PGSQL_SSL_MODE", "required"),
 		// ClickHouse
-		ClickhouseHost:     getEnv("CLICKHOUSE_HOST", "localhost"),
-		ClickhousePort:     getEnv("CLICKHOUSE_PORT", "8123"),
-		ClickhouseName:     getEnv("CLICKHOUSE_DATABASE", ""),
-		ClickhouseUser:     getEnv("CLICKHOUSE_USER", ""),
-		ClickhousePassword: getEnv("CLICKHOUSE_PASSWORD", ""),
+		ClickHouseHost:     getEnv("CH_HOST", "localhost"),
+		ClickHousePort:     getEnv("CH_PORT", "8123"),
+		ClickHouseName:     getEnv("CH_DATABASE", ""),
+		ClickHouseUser:     getEnv("CH_USER", ""),
+		ClickHousePassword: getEnv("CH_PASSWORD", ""),
 		// Redis
 		RedisHost:                getEnv("REDIS_HOST", "localhost"),
 		RedisPort:                getEnv("REDIS_PORT", "6379"),
