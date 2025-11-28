@@ -30,7 +30,7 @@ func GetChainService(network string) (ChainService, error) {
 
 	factory, exists := registry.services[network]
 	if !exists {
-		return nil, fmt.Errorf("unsupported network: %s", network)
+		return nil, fmt.Errorf("network %s not found", network)
 	}
 
 	return factory(), nil

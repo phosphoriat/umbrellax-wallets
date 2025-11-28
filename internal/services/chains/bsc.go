@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"strconv"
 	"strings"
 	"sync"
 
 	"wallets/internal/config"
+	"wallets/internal/database/redis"
 	"wallets/internal/database/vault"
-	"wallets/internal/services/api/aml"
+	"wallets/internal/repository"
 	"wallets/internal/services/api/bybit"
 	"wallets/internal/utils"
 
@@ -55,7 +57,7 @@ func newBsc() *Bsc {
 	// Create new RPC client
 	bscClient, err := ethclient.Dial(cfg.BscRrcUrl)
 	if err != nil {
-		log.Printf("failed to connect Bsc RPC API: %v", err)
+		log.Printf("[BSC] Failed to connect to RPC API: %v", err)
 	}
 
 	networkCode := "bsc"
@@ -64,6 +66,7 @@ func newBsc() *Bsc {
 
 	return &Bsc{
 		BaseChainService: BaseChainService{
+			WalletRepo:  repository.NewWalletRepository(),
 			NetworkCode: networkCode,
 			NativeToken: networkSettings["native_token"].(string),
 		},
@@ -105,10 +108,10 @@ func (bsc *Bsc) GetMasterWallet() (map[string]any, error) {
 	}
 	masterAddr := masterData["address"].(string)
 
-	// Get ERC20 tokens balances
+	// Get BEP20 tokens balances
 	balances := make(map[string]any)
 	for token, contractAddr := range config.ContractsAddresses[bsc.NetworkCode].(map[string]string) {
-		tokenBalance, _ := bsc.getErc20Balance(contractAddr, masterAddr)
+		tokenBalance, _ := bsc.getBep20Balance(contractAddr, masterAddr)
 		balances[token] = tokenBalance
 	}
 
@@ -123,39 +126,63 @@ func (bsc *Bsc) GetMasterWallet() (map[string]any, error) {
 }
 
 // GetTransactionCommission Get transaction commission
+// oType: Operation type (withdrawal/inner)
+// wType: Wallet type (master/user)
+// wId: User id (only for user wType)
 // currency: Token ticker
 // toAddr: Withdrawal to address
 // amount: Amount in float value
-// Returns: Map of all fee types with their values (chain_fee, bybit_fee, aml_fee)
-func (bsc *Bsc) GetTransactionCommission(currency, toAddr string, amount float64, memo string) (map[string]any, error) {
-	// Get master wallet address from Vault
-	masterData, err := vault.GetClient().GetSecret("/master/" + bsc.NetworkCode)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get master data: %w", err)
+// Returns: Map of all fee types (chain_fee, bybit_fee, aml_fee)
+func (bsc *Bsc) GetTransactionCommission(
+	oType, wType string, wId *string, currency, toAddr string, amount float64, memo string,
+) (map[string]float64, error) {
+	var walletPath string
+	if wType == "master" {
+		walletPath = "/master/" + bsc.NetworkCode
+	} else {
+		if wId == nil {
+			return nil, fmt.Errorf("wId is required")
+		}
+		walletPath = fmt.Sprintf("/users/%s/%s", *wId, bsc.NetworkCode)
 	}
-	masterAddr := masterData["address"].(string)
+
+	// Get wallet data from Vault
+	walletData, err := vault.GetClient().GetSecret(walletPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get wallet data: %w", err)
+	}
+	// Extract wallet address
+	fromAddr, ok := walletData["address"].(string)
+	if !ok || fromAddr == "" {
+		return nil, fmt.Errorf("invalid or missing %s wallet address in Vault", bsc.NetworkCode)
+	}
 
 	// Calc chain fee for currency
 	var chainFee float64 = 0
 	switch currency {
 	case "BNB":
-		chainFee, _ = bsc.calcNativeFee(masterAddr, toAddr, amount)
-
+		chainFee, err = bsc.calcNativeFee(fromAddr, toAddr, amount)
 	default:
-		chainFee, _ = bsc.calcErc20Fee(currency, masterAddr, toAddr, amount)
+		chainFee, err = bsc.calcBep20Fee(currency, fromAddr, toAddr, amount)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get transaction commission: %w", err)
 	}
 
-	// Get bybit withdrawal fee
-	bybitFee, _ := bybit.GetHTTPClient().GetWithdrawalFee(currency, bsc.NetworkCode)
+	var bybitFee, amlFee float64
+	if oType == "withdrawal" {
+		// Get bybit withdrawal fee (in currency value)
+		bybitFee, _ = bybit.GetHTTPClient().GetWithdrawalFee(currency, bsc.NetworkCode)
 
-	// Get AML check cost from config
-	cfg, _ := config.Load()
-	amlFee := cfg.AmlCheckCost
+		// Get AML check cost from config (in USD value)
+		cfg, _ := config.Load()
+		amlFee, _ = strconv.ParseFloat(cfg.AmlCheckCost, 64)
+	}
 
-	return map[string]any{
-		"chain_fee": chainFee,
-		"bybit_fee": bybitFee,
-		"aml_fee":   amlFee,
+	return map[string]float64{
+		"chain_fee": chainFee, // In BNB
+		"bybit_fee": bybitFee, // In currency value
+		"aml_fee":   amlFee,   // in USD
 	}, nil
 }
 
@@ -183,50 +210,309 @@ func (bsc *Bsc) GetTransactionStatus(hash, toAddr string) (string, error) {
 }
 
 // SendTransaction Send transaction to the network
+// wType: Wallet type (master/user)
+// wId: User id (only for user wType)
 // currency: Token ticker
 // toAddr: Withdrawal to address
 // amount: Amount in float value
 // Returns: Transaction hash
-func (bsc *Bsc) SendTransaction(currency, toAddr string, amount float64, memo string) (string, string, error) {
-	// Get master wallet address from Vault
-	masterData, err := vault.GetClient().GetSecret("/master/" + bsc.NetworkCode)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to get master data: %w", err)
-	}
-	masterAddr, ok := masterData["address"].(string)
-	if !ok || masterAddr == "" {
-		return "", "", fmt.Errorf("invalid or missing %s master address in Vault", bsc.NetworkCode)
+func (bsc *Bsc) SendTransaction(wType string, wId *string, currency, toAddr string, amount float64, memo string) (string, error) {
+	var walletPath string
+	if wType == "master" {
+		walletPath = fmt.Sprintf("/master/%s", bsc.NetworkCode)
+	} else {
+		if wId == nil {
+			return "", fmt.Errorf("wId is required")
+		}
+		walletPath = fmt.Sprintf("/users/%s/%s", *wId, bsc.NetworkCode)
 	}
 
-	// AML check to address
-	amlId, riskLevel, err := aml.GetClient().CheckAddress(bsc.NetworkCode, toAddr)
+	// Get wallet data from Vault
+	walletData, err := vault.GetClient().GetSecret(walletPath)
 	if err != nil {
-		return "", "", fmt.Errorf("AML check address '%s' at network '%s' failed: %w", toAddr, bsc.NetworkCode, err)
+		return "", fmt.Errorf("failed to get wallet data: %w", err)
 	}
-	// If high or severe AML risks detected, return error without sending transaction
-	if riskLevel == "high" || riskLevel == "severe" {
-		return "", amlId, fmt.Errorf("failed to send withdrawal transaction to '%s' in '%s': %s AML risk", toAddr, bsc.NetworkCode, riskLevel)
+	// Extract wallet address and private key
+	fromAddr, okF := walletData["address"].(string)
+	privateKey, okP := walletData["privateKey"].(string)
+	if !okF || !okP || fromAddr == "" {
+		return "", fmt.Errorf("invalid or missing %s wallet data in Vault", bsc.NetworkCode)
 	}
 
 	// Send new transaction on chain and get transaction hash
 	var hash string
 	switch currency {
 	case "BNB":
-		hash, err = bsc.sendNative(masterAddr, toAddr, amount)
+		hash, err = bsc.sendNative(fromAddr, toAddr, amount, privateKey)
 	default:
-		hash, err = bsc.sendErc20(currency, masterAddr, toAddr, amount)
+		hash, err = bsc.sendBep20(currency, fromAddr, toAddr, amount, privateKey)
 	}
 
 	if err != nil {
-		return "", "", fmt.Errorf("failed to send transaction: %w", err)
+		return "", fmt.Errorf("failed to send transaction: %w", err)
 	}
 
-	return hash, amlId, nil
+	return hash, nil
 }
 
 // GetInboundTransactions Get new inbound transactions list
-func (bsc *Bsc) GetInboundTransactions() ([]map[string]any, error) {
+func (bsc *Bsc) GetInboundTransactions() ([]*InboundTransaction, error) {
+	ctx := context.Background()
 
+	// Get current block number
+	currentBlockNum, err := bsc.Client.BlockNumber(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("[%s] Failed to get current block number: %w", bsc.NetworkCode, err)
+	}
+
+	// Get last block number from Redis (or use current block number, if not exists)
+	lastBlock, err := redis.GetClient().HGet(ctx, "last_blocks", bsc.NetworkCode)
+	var lastBlockNumber uint64
+	if err != nil {
+		lastBlockNumber = currentBlockNum
+	} else {
+		parsed, _ := strconv.ParseUint(lastBlock, 10, 64)
+		lastBlockNumber = parsed
+	}
+
+	// Check if current block not equal or less, than last block
+	if currentBlockNum <= lastBlockNumber {
+		log.Printf("[%s] No new blocks to process", bsc.NetworkCode)
+		return []*InboundTransaction{}, nil
+	}
+
+	// Get all address for network from DB
+	addressList, err := bsc.WalletRepo.GetAddressListByNetwork(bsc.NetworkCode)
+	if err != nil {
+		return nil, fmt.Errorf("[%s] Failed to get wallet address list: %w", bsc.NetworkCode, err)
+	}
+
+	// Get current chain id
+	chainID, err := bsc.Client.ChainID(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("[%s] Failed to get chain ID: %w", bsc.NetworkCode, err)
+	}
+
+	// Get BNB decimals from config
+	bnbDecimals, err := config.GetChainSetting[int64](
+		config.TokenSettings,
+		fmt.Sprintf("%s.BNB.decimals", bsc.NetworkCode),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("[%s] Failed to get BNB decimals from config: %w", bsc.NetworkCode, err)
+	}
+
+	// Get token ABI from config
+	bep20Abi, err := config.GetChainSetting[string](
+		config.NetworkSettings,
+		fmt.Sprintf("%s.abi", bsc.NetworkCode),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("[%s] Failed to get BEP20 ABI from config: %w", bsc.NetworkCode, err)
+	}
+	parsedAbi, err := abi.JSON(strings.NewReader(bep20Abi))
+	if err != nil {
+		return nil, fmt.Errorf("[%s] Failed to parse BEP20 ABI from config: %w", bsc.NetworkCode, err)
+	}
+
+	// Cache for contract decimals
+	decimalsCache := make(map[string]int64)
+	var decimalsCacheMu sync.RWMutex
+
+	// Wait group to wait for all tx blocks goroutines to complete
+	var wg sync.WaitGroup
+	// Concurrent save map for successfully processed blocks
+	successfulBlocks := &sync.Map{}
+	// Channel for collect transactions from all blocks
+	resultChan := make(chan []*InboundTransaction, currentBlockNum-lastBlockNumber)
+
+	log.Printf("[%s] Processing blocks %d to %d", bsc.NetworkCode, lastBlockNumber+1, currentBlockNum)
+
+	// Check all new blocks
+	for blockNum := lastBlockNumber + 1; blockNum <= currentBlockNum; blockNum++ {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			// Get block entity by number
+			block, err := bsc.Client.BlockByNumber(ctx, big.NewInt(int64(blockNum)))
+			if err != nil {
+				log.Printf("[%s] Failed to get block %d: %v", bsc.NetworkCode, blockNum, err)
+				resultChan <- []*InboundTransaction{}
+				return
+			}
+
+			log.Printf("[%s] Processing block %d with %d transactions",
+				bsc.NetworkCode, blockNum, len(block.Transactions()))
+
+			// Local goroutine tx list (one for every block)
+			localTxList := make([]*InboundTransaction, 0)
+
+			// Process transactions in block
+			for _, tx := range block.Transactions() {
+				// Get transaction receipt to check status
+				receipt, err := bsc.Client.TransactionReceipt(ctx, tx.Hash())
+				if err != nil {
+					log.Printf("[%s] Failed to get transaction receipt for '%s': %v",
+						bsc.NetworkCode, tx.Hash().Hex(), err)
+					continue
+				}
+
+				txHash := tx.Hash().Hex()
+
+				// Check if transaction was successful (status = 1)
+				if receipt.Status != types.ReceiptStatusSuccessful {
+					log.Printf("[%s] Transaction '%s' failed with status %d",
+						bsc.NetworkCode, txHash, receipt.Status)
+					continue
+				}
+
+				// Check if it's a native BNB transfer
+				if tx.To() != nil && tx.Value().Cmp(big.NewInt(0)) > 0 {
+					toAddr := strings.ToLower(tx.To().Hex())
+
+					// Check if address exists in network addresses list
+					if userId, ok := addressList[toAddr]; ok {
+						// Get sender address
+						from, err := types.Sender(types.LatestSignerForChainID(chainID), tx)
+						if err != nil {
+							log.Printf("[%s] Failed to get sender for tx '%s': %v", bsc.NetworkCode, txHash, err)
+							continue
+						}
+
+						// Get converted amount (in BNB)
+						amount := utils.RemoveDecimals(tx.Value(), bnbDecimals)
+
+						localTxList = append(localTxList, &InboundTransaction{
+							UserId:   int(userId),
+							Currency: "BNB",
+							TxId:     txHash,
+							From:     from.Hex(),
+							To:       tx.To().Hex(),
+							Amount:   amount,
+						})
+					}
+				}
+
+				// Check if it's an BEP20 token transfer
+				// Data structure: 4 bytes method ID + 32 bytes address + 32 bytes amount
+				if tx.To() != nil && len(tx.Data()) >= 68 {
+					// Check if method is transfer (a9059cbb)
+					methodId := fmt.Sprintf("%x", tx.Data()[0:4])
+					if methodId == "a9059cbb" {
+						// Get contract address
+						contractAddr := strings.ToLower(tx.To().Hex())
+
+						// Get token name by contract address
+						token, err := config.GetTokenByContractAddr(bsc.NetworkCode, contractAddr)
+						if err != nil {
+							continue
+						}
+
+						// Extract to address (bytes 4-36, take last 20 bytes)
+						toAddrBytes := tx.Data()[16:36]
+						toAddr := strings.ToLower(common.BytesToAddress(toAddrBytes).Hex())
+
+						// Check if address exists in network addresses list
+						if userId, ok := addressList[toAddr]; ok {
+							// Get contract decimals from cache or fetch from contract
+							decimalsCacheMu.RLock()
+							cached, exists := decimalsCache[contractAddr]
+							decimalsCacheMu.RUnlock()
+
+							var decimalsValue int64
+							if exists {
+								// Get contract decimals from cache
+								decimalsValue = cached
+							} else {
+								// Get contract instance from ABI
+								var out []interface{}
+								contract := bind.NewBoundContract(common.HexToAddress(contractAddr), parsedAbi, bsc.Client, bsc.Client, bsc.Client)
+
+								// Fetch decimals from contract
+								err = contract.Call(&bind.CallOpts{}, &out, "decimals")
+								if err != nil {
+									log.Printf("[%s] Failed to get contract decimals for '%s': %v",
+										bsc.NetworkCode, contractAddr, err)
+									continue
+								}
+								decimalsValue = *abi.ConvertType(out[0], new(int64)).(*int64)
+
+								// Save decimals to cache
+								decimalsCacheMu.Lock()
+								decimalsCache[contractAddr] = decimalsValue
+								decimalsCacheMu.Unlock()
+							}
+
+							// Get sender address
+							from, err := types.Sender(types.LatestSignerForChainID(chainID), tx)
+							if err != nil {
+								log.Printf("[%s] Failed to get sender for tx '%s': %v", bsc.NetworkCode, txHash, err)
+								continue
+							}
+
+							// Extract amount (bytes 36-68)
+							rawAmount := new(big.Int).SetBytes(tx.Data()[36:68])
+							// Get converted amount
+							amount := utils.RemoveDecimals(rawAmount, decimalsValue)
+
+							localTxList = append(localTxList, &InboundTransaction{
+								UserId:   int(userId),
+								Currency: token,
+								TxId:     txHash,
+								From:     from.Hex(),
+								To:       common.BytesToAddress(toAddrBytes).Hex(),
+								Amount:   amount,
+							})
+						}
+					}
+				}
+			}
+
+			// Mark the block as successfully processed
+			successfulBlocks.Store(blockNum, true)
+			// Send batch to result channel (one send for block)
+			resultChan <- localTxList
+		}()
+	}
+
+	// Waiting for results
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+
+	// Collect results from batches
+	txList := make([]*InboundTransaction, 0)
+	for batch := range resultChan {
+		txList = append(txList, batch...)
+	}
+
+	// Get the last continuously successful block
+	// This ensures that we don't miss blocks the next time we run
+	lastContinuousBlock := lastBlockNumber
+	for blockNum := lastBlockNumber + 1; blockNum <= currentBlockNum; blockNum++ {
+		if _, ok := successfulBlocks.Load(blockNum); ok {
+			lastContinuousBlock = blockNum
+		} else {
+			// Stop, if found the first failed block
+			log.Printf("[%s] Block %d was not processed successfully, stopping at %d",
+				bsc.NetworkCode, blockNum, lastContinuousBlock)
+			break
+		}
+	}
+
+	// Save last processed block in Redis
+	if lastContinuousBlock > lastBlockNumber {
+		err = redis.GetClient().HSet(ctx, "last_blocks", bsc.NetworkCode, lastContinuousBlock)
+		if err != nil {
+			return nil, fmt.Errorf("[%s] Failed to save last block in Redis: %w", bsc.NetworkCode, err)
+		}
+	}
+	log.Printf("[%s] Processed %d transactions successful", bsc.NetworkCode, len(txList))
+
+	return txList, nil
 }
 
 /* GetUserWallet private methods group */
@@ -285,19 +571,25 @@ func (bsc *Bsc) getNativeBalance(addr string) (float64, error) {
 	}
 
 	// Get BNB decimals from config
-	bnbDecimals, _ := config.GetChainSetting[int64](config.TokenSettings, fmt.Sprintf("%s.bsc.decimals", bsc.NetworkCode))
+	bnbDecimals, _ := config.GetChainSetting[int64](
+		config.TokenSettings,
+		fmt.Sprintf("%s.%s.decimals", bsc.NetworkCode, "BNB"),
+	)
 	// Return converted balance (in BNB)
 	return utils.RemoveDecimals(rawBalance, bnbDecimals), nil
 }
 
-// @private getErc20Balance Get wallet ERC20 token balance
+// @private getBep20Balance Get wallet BEP20 token balance
 // contractAddr: Token contract address
 // addr: Wallet address
-// Returns: ERC20 token wallet balance
-func (bsc *Bsc) getErc20Balance(contractAddr, addr string) (float64, error) {
+// Returns: BEP20 token wallet balance
+func (bsc *Bsc) getBep20Balance(contractAddr, addr string) (float64, error) {
 	// Get token ABI from config
-	erc20Abi, err := config.GetChainSetting[string](config.NetworkSettings, fmt.Sprintf("%s.abi", bsc.NetworkCode))
-	parsedAbi, err := abi.JSON(strings.NewReader(erc20Abi))
+	bep20Abi, err := config.GetChainSetting[string](
+		config.NetworkSettings,
+		fmt.Sprintf("%s.abi", bsc.NetworkCode),
+	)
+	parsedAbi, err := abi.JSON(strings.NewReader(bep20Abi))
 	if err != nil {
 		return 0, fmt.Errorf("failed to parse ABI: %w", err)
 	}
@@ -326,13 +618,16 @@ func (bsc *Bsc) getErc20Balance(contractAddr, addr string) (float64, error) {
 
 /* GetTransactionCommission private methods group */
 // @private calcNativeFee Calc fee for BNB transaction
-// fromAddr: Master wallet address
+// fromAddr: Wallet address
 // toAddr: Address for withdrawal
 // amount: Amount in float value
 // Returns: Fee in BNB
 func (bsc *Bsc) calcNativeFee(fromAddr, toAddr string, amount float64) (float64, error) {
-	// Get WEI decimals from config
-	weiDecimals, _ := config.GetChainSetting[int64](config.TokenSettings, fmt.Sprintf("%s.bsc.decimals", bsc.NetworkCode))
+	// Get BNB decimals from config
+	weiDecimals, _ := config.GetChainSetting[int64](
+		config.TokenSettings,
+		fmt.Sprintf("%s.%s.decimals", bsc.NetworkCode, "BNB"),
+	)
 	// Convert amount to WEI
 	amountWei := utils.ApplyDecimals(amount, weiDecimals)
 
@@ -358,26 +653,32 @@ func (bsc *Bsc) calcNativeFee(fromAddr, toAddr string, amount float64) (float64,
 
 	// Get total fee in WEI
 	totalFeeWei := new(big.Int).Mul(gasPrice, new(big.Int).SetUint64(gasLimit))
-	// Convert total fee to BNB
+	// Return converted total fee in BNB
 	return utils.RemoveDecimals(totalFeeWei, weiDecimals), nil
 }
 
-// @private calcErc20Fee Calc fee for ERC20 token transaction
+// @private calcBep20Fee Calc fee for BEP20 token transaction
 // currency: Token ticker
-// fromAddr: Master wallet address
+// fromAddr: Wallet address
 // toAddr: Address for withdrawal
 // amount: Amount in float value
 // Returns: Fee in BNB
-func (bsc *Bsc) calcErc20Fee(currency, fromAddr, toAddr string, amount float64) (float64, error) {
+func (bsc *Bsc) calcBep20Fee(currency, fromAddr, toAddr string, amount float64) (float64, error) {
 	// Get token contract address
-	contractAddr, err := config.GetChainSetting[string](config.ContractsAddresses, fmt.Sprintf("%s.%s", bsc.NetworkCode, currency))
+	contractAddr, err := config.GetChainSetting[string](
+		config.ContractsAddresses,
+		fmt.Sprintf("%s.%s", bsc.NetworkCode, currency),
+	)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get contract address: %w", err)
 	}
 
 	// Get token ABI from config
-	erc20Abi, err := config.GetChainSetting[string](config.NetworkSettings, fmt.Sprintf("%s.abi", bsc.NetworkCode))
-	parsedAbi, err := abi.JSON(strings.NewReader(erc20Abi))
+	bep20Abi, err := config.GetChainSetting[string](
+		config.NetworkSettings,
+		fmt.Sprintf("%s.abi", bsc.NetworkCode),
+	)
+	parsedAbi, err := abi.JSON(strings.NewReader(bep20Abi))
 	if err != nil {
 		return 0, fmt.Errorf("failed to parse ABI: %w", err)
 	}
@@ -423,20 +724,28 @@ func (bsc *Bsc) calcErc20Fee(currency, fromAddr, toAddr string, amount float64) 
 	// Get total fee in WEI
 	totalFeeWei := new(big.Int).Mul(gasPrice, new(big.Int).SetUint64(gasLimit))
 	// Get WEI decimals from config
-	weiDecimals, _ := config.GetChainSetting[int64](config.TokenSettings, fmt.Sprintf("%s.bsc.decimals", bsc.NetworkCode))
-	// Convert total fee to BNB
+	weiDecimals, _ := config.GetChainSetting[int64](
+		config.TokenSettings,
+		fmt.Sprintf("%s.bsc.decimals", bsc.NetworkCode),
+	)
+
+	// Return converted total fee in BNB
 	return utils.RemoveDecimals(totalFeeWei, weiDecimals), nil
 }
 
 /* SendTransaction private methods group */
 // @private sendNative Send native BNB transaction
-// fromAddr: Master wallet address
+// fromAddr: Wallet address
 // toAddr: Address for withdrawal
 // amount: Amount in float value
+// privateKey: Wallet private key
 // Returns: Transaction hash
-func (bsc *Bsc) sendNative(fromAddr, toAddr string, amount float64) (string, error) {
-	// Get decimals from config
-	weiDecimals, _ := config.GetChainSetting[int64](config.TokenSettings, fmt.Sprintf("%s.bsc.decimals", bsc.NetworkCode))
+func (bsc *Bsc) sendNative(fromAddr, toAddr string, amount float64, privateKey string) (string, error) {
+	// Get BNB decimals from config
+	weiDecimals, _ := config.GetChainSetting[int64](
+		config.TokenSettings,
+		fmt.Sprintf("%s.%s.decimals", bsc.NetworkCode, "BNB"),
+	)
 	// Convert amount to WEI
 	amountWei := utils.ApplyDecimals(amount, weiDecimals)
 
@@ -477,25 +786,32 @@ func (bsc *Bsc) sendNative(fromAddr, toAddr string, amount float64) (string, err
 	})
 
 	// Sign, broadcast transaction to the network and return hash
-	return bsc.signAndBroadcast(tx)
+	return bsc.signAndBroadcast(tx, privateKey)
 }
 
-// @private sendErc20 Send ERC20 token transaction
+// @private sendBep20 Send BEP20 token transaction
 // currency: Token ticker
-// fromAddr: Master wallet address
+// fromAddr: Wallet address
 // toAddr: Address for withdrawal
 // amount: Amount in float value
+// privateKey: Wallet private key
 // Returns: Transaction hash
-func (bsc *Bsc) sendErc20(currency, fromAddr, toAddr string, amount float64) (string, error) {
+func (bsc *Bsc) sendBep20(currency, fromAddr, toAddr string, amount float64, privateKey string) (string, error) {
 	// Get token contract address
-	contractAddr, err := config.GetChainSetting[string](config.ContractsAddresses, fmt.Sprintf("%s.%s", bsc.NetworkCode, currency))
+	contractAddr, err := config.GetChainSetting[string](
+		config.ContractsAddresses,
+		fmt.Sprintf("%s.%s", bsc.NetworkCode, currency),
+	)
 	if err != nil {
 		return "", fmt.Errorf("failed to get contract address: %w", err)
 	}
 
 	// Get token ABI from config
-	erc20Abi, err := config.GetChainSetting[string](config.NetworkSettings, fmt.Sprintf("%s.abi", bsc.NetworkCode))
-	parsedAbi, err := abi.JSON(strings.NewReader(erc20Abi))
+	bep20Abi, err := config.GetChainSetting[string](
+		config.NetworkSettings,
+		fmt.Sprintf("%s.abi", bsc.NetworkCode),
+	)
+	parsedAbi, err := abi.JSON(strings.NewReader(bep20Abi))
 	if err != nil {
 		return "", fmt.Errorf("failed to parse ABI: %w", err)
 	}
@@ -555,33 +871,28 @@ func (bsc *Bsc) sendErc20(currency, fromAddr, toAddr string, amount float64) (st
 	})
 
 	// Sign, broadcast transaction to the network and return hash
-	return bsc.signAndBroadcast(tx)
+	return bsc.signAndBroadcast(tx, privateKey)
 }
 
 // @private signAndBroadcast Sign and broadcast transaction to the network
 // tx: Transaction struct
+// privateKey: Wallet private key
 // Returns: Transaction hash
-func (bsc *Bsc) signAndBroadcast(tx *types.Transaction) (string, error) {
-	// Get master wallet private key from Vault
-	masterData, err := vault.GetClient().GetSecret("/master/" + bsc.NetworkCode)
-	if err != nil {
-		return "", fmt.Errorf("failed to get master data: %w", err)
-	}
-
+func (bsc *Bsc) signAndBroadcast(tx *types.Transaction, privateKey string) (string, error) {
 	// Convert hex private key string to *ecdsa.PrivateKey
-	privateKey, err := crypto.HexToECDSA(masterData["privateKey"].(string))
+	ecdsaPk, err := crypto.HexToECDSA(privateKey)
 	if err != nil {
 		return "", fmt.Errorf("invalid or missing %s master private key in Vault", bsc.NetworkCode)
 	}
 
-	// Get chain ID
-	chainID, err := bsc.Client.NetworkID(context.Background())
+	// Get chain id
+	chainId, err := bsc.Client.NetworkID(context.Background())
 	if err != nil {
 		return "", fmt.Errorf("failed to get chain ID: %w", err)
 	}
 
 	// Sign transaction (EIP-155)
-	signedTx, err := types.SignTx(tx, types.NewEIP155Signer(chainID), privateKey)
+	signedTx, err := types.SignTx(tx, types.NewEIP155Signer(chainId), ecdsaPk)
 	if err != nil {
 		return "", fmt.Errorf("failed to sign tx: %w", err)
 	}
@@ -594,5 +905,3 @@ func (bsc *Bsc) signAndBroadcast(tx *types.Transaction) (string, error) {
 	// Return transaction hash
 	return signedTx.Hash().Hex(), nil
 }
-
-/* ProcessInboundTransactions private methods group */

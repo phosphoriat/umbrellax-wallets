@@ -75,10 +75,11 @@ func (t *WithdrawalsTask) processItem(ctx context.Context, requestId, itemStr st
 	to, okT := item["to"].(string)
 	amount, okA := item["amount"].(float64)
 	memo, okM := item["memo"].(string)
+	amlId, okAml := item["aml_id"].(string)
 	if !okM {
 		memo = ""
 	}
-	if !okB || !okC || !okN || !okT || !okA {
+	if !okB || !okC || !okN || !okT || !okA || !okAml {
 		return fmt.Errorf("invalid bybit withdrawal tx item data: %+v", item)
 	}
 
@@ -100,7 +101,7 @@ func (t *WithdrawalsTask) processItem(ctx context.Context, requestId, itemStr st
 			}
 
 			// Send transaction from master wallet to address from withdraw request
-			hash, amlId, err := chainService.SendTransaction("master", nil, currency, to, amount, memo)
+			hash, err := chainService.SendTransaction("master", nil, currency, to, amount, memo)
 			if err != nil {
 				return err
 			}

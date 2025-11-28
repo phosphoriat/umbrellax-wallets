@@ -10,7 +10,9 @@ import (
 	"sync"
 
 	"wallets/internal/config"
+	"wallets/internal/database/redis"
 	"wallets/internal/database/vault"
+	"wallets/internal/repository"
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil"
@@ -52,7 +54,7 @@ func newBitcoin() *Bitcoin {
 		},
 	}, nil)
 	if err != nil {
-		log.Printf("failed to connect Bitcoin RPC API: %v", err)
+		log.Printf("[Bitcoin] Failed to connect to RPC API: %v", err)
 	}
 
 	networkCode := "bitcoin"
@@ -61,6 +63,7 @@ func newBitcoin() *Bitcoin {
 
 	return &Bitcoin{
 		BaseChainService: BaseChainService{
+			WalletRepo:  repository.NewWalletRepository(),
 			NetworkCode: networkCode,
 			NativeToken: networkSettings["native_token"].(string),
 		},
@@ -110,7 +113,15 @@ func (btc *Bitcoin) GetMasterWallet() (map[string]any, error) {
 }
 
 // GetTransactionCommission Get transaction commission
-func (btc *Bitcoin) GetTransactionCommission(currency, to string, amount float64, memo string) (map[string]any, error) {
+// oType: Operation type (withdrawal/inner)
+// wType: Wallet type (master/user)
+// wId: User id (only for user wType)
+// currency: Token ticker
+// toAddr: Withdrawal to address
+// amount: Amount in float value
+// memo: Memo tag
+// Returns: Map of all fee types (chain_fee, bybit_fee, aml_fee)
+func (btc *Bitcoin) GetTransactionCommission(oType, wType string, wId *string, currency, to string, amount float64, memo string) (map[string]float64, error) {
 
 }
 
@@ -122,12 +133,20 @@ func (btc *Bitcoin) GetTransactionStatus(hash, toAddr string) (string, error) {
 }
 
 // SendTransaction Send transaction to the network
-func (btc *Bitcoin) SendTransaction(currency, to string, amount float64, memo string) (string, string, error) {
+// oType: Operation type (withdrawal/inner)
+// wType: Wallet type (master/user)
+// wId: User id (only for user wType)
+// currency: Token ticker
+// toAddr: Withdrawal to address
+// amount: Amount in float value
+// memo: Memo tag
+// Returns: Transaction hash
+func (btc *Bitcoin) SendTransaction(oType, wType string, wId *string, currency, to string, amount float64, memo string) (string, string, error) {
 
 }
 
 // GetInboundTransactions Get new inbound transactions list
-func (btc *Bitcoin) GetInboundTransactions() ([]map[string]any, error) {
+func (btc *Bitcoin) GetInboundTransactions() ([]*InboundTransaction, error) {
 
 }
 

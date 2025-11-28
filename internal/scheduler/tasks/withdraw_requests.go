@@ -78,10 +78,11 @@ func (t *WithdrawRequestTask) processItem(ctx context.Context, requestId, itemSt
 	to, okT := item["to"].(string)
 	amount, okA := item["amount"].(float64)
 	memo, okM := item["memo"].(string)
+	amlId, okAml := item["aml_id"].(string)
 	if !okM {
 		memo = ""
 	}
-	if !okC || !okN || !okT || !okA {
+	if !okC || !okN || !okT || !okA || !okAml {
 		return fmt.Errorf("invalid bybit withdraw request item data: %+v", item)
 	}
 
@@ -100,6 +101,7 @@ func (t *WithdrawRequestTask) processItem(ctx context.Context, requestId, itemSt
 		"to":       to,
 		"amount":   amount,
 		"memo":     memo,
+		"aml_id":   amlId,
 	})
 	t.redis.HSet(ctx, t.RedisBybitWithdrawalsKey, requestId, wItem)
 

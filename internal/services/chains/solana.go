@@ -10,7 +10,9 @@ import (
 	"sync"
 
 	"wallets/internal/config"
+	"wallets/internal/database/redis"
 	"wallets/internal/database/vault"
+	"wallets/internal/repository"
 
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
@@ -49,6 +51,7 @@ func newSolana() *Solana {
 
 	return &Solana{
 		BaseChainService: BaseChainService{
+			WalletRepo:  repository.NewWalletRepository(),
 			NetworkCode: networkCode,
 			NativeToken: networkSettings["native_token"].(string),
 		},
@@ -106,7 +109,15 @@ func (sol *Solana) GetMasterWallet() (map[string]any, error) {
 }
 
 // GetTransactionCommission Get transaction commission
-func (sol *Solana) GetTransactionCommission(currency, to string, amount float64, memo string) (map[string]any, error) {
+// oType: Operation type (withdrawal/inner)
+// wType: Wallet type (master/user)
+// wId: User id (only for user wType)
+// currency: Token ticker
+// toAddr: Withdrawal to address
+// amount: Amount in float value
+// memo: Memo tag
+// Returns: Map of all fee types (chain_fee, bybit_fee, aml_fee)
+func (sol *Solana) GetTransactionCommission(oType, wType string, wId *string, currency, to string, amount float64, memo string) (map[string]float64, error) {
 
 }
 
@@ -118,12 +129,20 @@ func (sol *Solana) GetTransactionStatus(hash, toAddr string) (string, error) {
 }
 
 // SendTransaction Send transaction to the network
-func (sol *Solana) SendTransaction(currency, to string, amount float64, memo string) (string, string, error) {
+// oType: Operation type (withdrawal/inner)
+// wType: Wallet type (master/user)
+// wId: User id (only for user wType)
+// currency: Token ticker
+// toAddr: Withdrawal to address
+// amount: Amount in float value
+// memo: Memo tag
+// Returns: Transaction hash
+func (sol *Solana) SendTransaction(oType, wType string, wId *string, currency, to string, amount float64, memo string) (string, string, error) {
 
 }
 
 // GetInboundTransactions Get new inbound transactions list
-func (sol *Solana) GetInboundTransactions() ([]map[string]any, error) {
+func (sol *Solana) GetInboundTransactions() ([]*InboundTransaction, error) {
 
 }
 
@@ -208,7 +227,7 @@ func (sol *Solana) getSplBalance(contractAddr, addr string) (float64, error) {
 
 /* GetTransactionCommission private methods group */
 // @private calcNativeFee Calc fee for SOL transaction
-// fromAddress: Master wallet address
+// fromAddr: Wallet address
 // toAddress: Address for withdrawal
 // amount: Amount in float value
 // Returns: Fee in SOL
@@ -218,7 +237,7 @@ func (sol *Solana) calcNativeFee(fromAddr, toAddr string, amount float64) (float
 
 // @private calcSplFee Calc fee for SPL token transaction
 // currency: Token ticker
-// fromAddress: Master wallet address
+// fromAddr: Wallet address
 // toAddress: Address for withdrawal
 // amount: Amount in float value
 // Returns: Fee in SOL
@@ -228,7 +247,7 @@ func (sol *Solana) calcSplFee(currency, fromAddr, toAddr string, amount float64)
 
 /* SendTransaction private methods group */
 // @private sendNative Send native SOL transaction
-// fromAddr: Master wallet address
+// fromAddr: Wallet address
 // toAddr: Address for withdrawal
 // amount: Amount in float value
 // Returns: Transaction hash
@@ -238,17 +257,10 @@ func (sol *Solana) sendNative(fromAddr, toAddr string, amount float64) (string, 
 
 // @private sendSpl Send SPL token transaction
 // currency: Token ticker
-// fromAddr: Master wallet address
+// fromAddr: Wallet address
 // toAddr: Address for withdrawal
 // amount: Amount in float value
 // Returns: Transaction hash
 func (sol *Solana) sendSpl(currency, fromAddr, toAddr string, amount float64) (string, error) {
-
-}
-
-// @private signAndBroadcast Sign and broadcast transaction to the network
-// tx: Transaction struct
-// Returns: Transaction hash
-func (sol *Solana) signAndBroadcast(tx) (string, error) {
 
 }

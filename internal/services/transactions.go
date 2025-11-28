@@ -1,6 +1,8 @@
 package services
 
 import (
+	"fmt"
+	"wallets/internal/services/api/aml"
 	"wallets/internal/services/chains"
 )
 
@@ -12,14 +14,14 @@ func NewTransactionsService() *TransactionsService {
 }
 
 // GetTransactionCommission Calc transaction commission
-func (s *TransactionsService) GetTransactionCommission(network, currency, to string, amount float64, memo string) (map[string]any, error) {
+func (s *TransactionsService) GetTransactionCommission(network, currency, to string, amount float64, memo string) (map[string]float64, error) {
 	// Get chain service instance from registry
 	chainService, err := chains.GetChainService(network)
 	if err != nil {
 		return nil, err
 	}
 
-	res, err := chainService.GetTransactionCommission("master", nil, currency, to, amount, memo)
+	res, err := chainService.GetTransactionCommission("withdrawal", "master", nil, currency, to, amount, memo)
 	if err != nil {
 		return nil, err
 	}
@@ -51,7 +53,17 @@ func (s *TransactionsService) SendWithdrawal(network, currency, to string, amoun
 		return nil, err
 	}
 
-	res, err := chains.CreateWithdrawRequest(currency, network, to, amount, memo)
+	// AML check to address
+	amlId, riskLevel, err := aml.GetClient().CheckAddress(network, to)
+	if err != nil {
+		return nil, fmt.Errorf("AML check address '%s' in '%s' failed: %w", to, network, err)
+	}
+	// If high or severe AML risks detected, return error without sending transaction
+	if riskLevel == "high" || riskLevel == "severe" {
+		return nil, fmt.Errorf("failed to send withdrawal transaction to '%s' in %s: %s AML risk", to, network, riskLevel)
+	}
+
+	res, err := chains.CreateWithdrawRequest(currency, network, to, amount, memo, amlId)
 	if err != nil {
 		return nil, err
 	}

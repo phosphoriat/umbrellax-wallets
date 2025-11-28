@@ -22,7 +22,7 @@ func NewRefillsTask() *RefillsTask {
 }
 
 func (t *RefillsTask) Execute(ctx context.Context) error {
-	err := chains.ProcessInboundTransactions()
+	err := chains.ProcessInboundTransactions(ctx)
 	if err != nil {
 		log.Printf("Processing inbound transactions error: %v", err)
 		return nil

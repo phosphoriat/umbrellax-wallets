@@ -15,7 +15,6 @@ import (
 	"wallets/internal/database/redis"
 	"wallets/internal/database/vault"
 	"wallets/internal/repository"
-	"wallets/internal/services/api/aml"
 	"wallets/internal/services/api/bybit"
 
 	"github.com/btcsuite/btcd/btcutil/hdkeychain"
@@ -60,7 +59,7 @@ func newTron() *Tron {
 	rpcClient := client.NewGrpcClient(cfg.TronRpcUrl)
 	err := rpcClient.Start(client.GRPCInsecure())
 	if err != nil {
-		log.Printf("failed to connect Tron RPC API: %v", err)
+		log.Printf("[Tron] Failed to connect to RPC API: %v", err)
 	}
 
 	networkCode := "tron"
@@ -130,13 +129,16 @@ func (tron *Tron) GetMasterWallet() (map[string]any, error) {
 }
 
 // GetTransactionCommission Get transaction commission
+// oType: Operation type (withdrawal/inner)
 // wType: Wallet type (master/user)
 // wId: User id (only for user wType)
 // currency: Token ticker
 // toAddr: Withdrawal to address
 // amount: Amount in float value
-// Returns: Map of all fee types with their values (chain_fee, bybit_fee, aml_fee)
-func (tron *Tron) GetTransactionCommission(wType string, wId *string, currency, toAddr string, amount float64, memo string) (map[string]float64, error) {
+// Returns: Map of all fee types (chain_fee, bybit_fee, aml_fee)
+func (tron *Tron) GetTransactionCommission(
+	oType, wType string, wId *string, currency, toAddr string, amount float64, memo string,
+) (map[string]float64, error) {
 	var walletPath string
 	if wType == "master" {
 		walletPath = "/master/" + tron.NetworkCode
@@ -171,7 +173,7 @@ func (tron *Tron) GetTransactionCommission(wType string, wId *string, currency, 
 	}
 
 	var bybitFee, amlFee float64
-	if wType == "master" {
+	if oType == "withdrawal" {
 		// Get bybit withdrawal fee (in currency value)
 		bybitFee, _ = bybit.GetHTTPClient().GetWithdrawalFee(currency, tron.NetworkCode)
 
@@ -211,13 +213,13 @@ func (tron *Tron) GetTransactionStatus(hash, toAddr string) (string, error) {
 // toAddr: Withdrawal to address
 // amount: Amount in float value
 // Returns: Transaction hash
-func (tron *Tron) SendTransaction(wType string, wId *string, currency, toAddr string, amount float64, memo string) (string, string, error) {
+func (tron *Tron) SendTransaction(wType string, wId *string, currency, toAddr string, amount float64, memo string) (string, error) {
 	var walletPath string
 	if wType == "master" {
 		walletPath = fmt.Sprintf("/master/%s", tron.NetworkCode)
 	} else {
 		if wId == nil {
-			return "", "", fmt.Errorf("wId is required")
+			return "", fmt.Errorf("wId is required")
 		}
 		walletPath = fmt.Sprintf("/users/%s/%s", *wId, tron.NetworkCode)
 	}
@@ -225,23 +227,13 @@ func (tron *Tron) SendTransaction(wType string, wId *string, currency, toAddr st
 	// Get wallet data from Vault
 	walletData, err := vault.GetClient().GetSecret(walletPath)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to get wallet data: %w", err)
+		return "", fmt.Errorf("failed to get wallet data: %w", err)
 	}
 	// Extract wallet address and private key
 	fromAddr, okF := walletData["address"].(string)
 	privateKey, okP := walletData["privateKey"].(string)
 	if !okF || !okP || fromAddr == "" {
-		return "", "", fmt.Errorf("invalid or missing %s wallet data in Vault", tron.NetworkCode)
-	}
-
-	// AML check to address
-	amlId, riskLevel, err := aml.GetClient().CheckAddress(tron.NetworkCode, toAddr)
-	if err != nil {
-		return "", "", fmt.Errorf("AML check address '%s' at network '%s' failed: %w", toAddr, tron.NetworkCode, err)
-	}
-	// If high or severe AML risks detected, return error without sending transaction
-	if riskLevel == "high" || riskLevel == "severe" {
-		return "", amlId, fmt.Errorf("failed to send withdrawal transaction to '%s' in '%s': %s AML risk", toAddr, tron.NetworkCode, riskLevel)
+		return "", fmt.Errorf("invalid or missing %s wallet data in Vault", tron.NetworkCode)
 	}
 
 	// Send new transaction on chain and get transaction hash
@@ -254,161 +246,272 @@ func (tron *Tron) SendTransaction(wType string, wId *string, currency, toAddr st
 	}
 
 	if err != nil {
-		return "", "", fmt.Errorf("failed to send transaction: %w", err)
+		return "", fmt.Errorf("failed to send transaction: %w", err)
 	}
 
-	return hash, amlId, nil
+	return hash, nil
 }
 
 // GetInboundTransactions Get new inbound transactions list
 // Returns: Inbound transactions list
-func (tron *Tron) GetInboundTransactions() ([]map[string]any, error) {
+func (tron *Tron) GetInboundTransactions() ([]*InboundTransaction, error) {
+	ctx := context.Background()
+
 	// Get current block
 	currentBlock, err := tron.Client.GetNowBlock()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get current block: %w", err)
+		return nil, fmt.Errorf("[%s] Failed to get current block: %w", tron.NetworkCode, err)
 	}
-
-	// Get last block number
-	lastBlock, err := redis.GetClient().HGet(context.Background(), "last_blocks", tron.NetworkCode)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get last block: %w", err)
-	}
-	lastBlockNumber, _ := strconv.ParseInt(lastBlock, 10, 64)
 	// Get current block number
 	currentBlockNum := currentBlock.BlockHeader.RawData.Number
+
+	// Get last block number from Redis (or use current block number, if not exists)
+	lastBlock, err := redis.GetClient().HGet(ctx, "last_blocks", tron.NetworkCode)
+	var lastBlockNumber int64
+	if err != nil {
+		lastBlockNumber = currentBlockNum
+	} else {
+		lastBlockNumber, _ = strconv.ParseInt(lastBlock, 10, 64)
+	}
+
+	// Check if current block not equal or less, than last block
+	if currentBlockNum <= lastBlockNumber {
+		log.Printf("[%s] No new blocks to process", tron.NetworkCode)
+		return []*InboundTransaction{}, nil
+	}
 
 	// Get all address for network from DB
 	addressList, err := tron.WalletRepo.GetAddressListByNetwork(tron.NetworkCode)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get wallet address list for network %s: %w", tron.NetworkCode, err)
+		return nil, fmt.Errorf("[%s] Failed to get wallet address list: %w", tron.NetworkCode, err)
 	}
 
-	txList := make([]map[string]any, 0)
+	// Get TRX decimals from config
+	trxDecimals, err := config.GetChainSetting[int64](
+		config.TokenSettings,
+		fmt.Sprintf("%s.%s.decimals", tron.NetworkCode, "TRX"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("[%s] Failed to get TRX decimals from config: %w", tron.NetworkCode, err)
+	}
+
+	// Cache for contract decimals
+	decimalsCache := make(map[string]int64)
+	var decimalsCacheMu sync.RWMutex
+
+	// Wait group to wait for all tx blocks goroutines to complete
+	var wg sync.WaitGroup
+	// Concurrent save map for successfully processed blocks
+	successfulBlocks := &sync.Map{}
+	// Channel for collect transactions from all blocks Канал для сбора транзакций из всех блоков
+	resultChan := make(chan []*InboundTransaction, currentBlockNum-lastBlockNumber)
+
+	log.Printf("[%s] Processing blocks %d to %d", tron.NetworkCode, lastBlockNumber+1, currentBlockNum)
+
 	// Check all new blocks
 	for blockNum := lastBlockNumber + 1; blockNum <= currentBlockNum; blockNum++ {
-		// Get block entity by number
-		block, err := tron.Client.GetBlockByNum(blockNum)
-		if err != nil {
-			log.Printf("Failed to get block %d: %v", blockNum, err)
-			continue
-		}
+		wg.Add(1)
 
-		log.Printf("Processing block %d with %d transactions", blockNum, len(block.Transactions))
+		go func() {
+			defer wg.Done()
 
-		// Process transactions in block
-		for _, tx := range block.Transactions {
-			if tx.Transaction.RawData == nil || len(tx.Transaction.RawData.Contract) == 0 {
-				log.Printf("Skipping block %d: no contract found", blockNum)
-				continue
+			// Get block entity by number
+			block, err := tron.Client.GetBlockByNum(blockNum)
+			if err != nil {
+				log.Printf("[%s] Failed to get block %d: %v", tron.NetworkCode, blockNum, err)
+				resultChan <- []*InboundTransaction{}
+				return
 			}
 
-			// Get contract entity and tx id
-			contract := tx.Transaction.RawData.Contract[0]
-			txId := fmt.Sprintf("%x", tx.GetTxid())
+			log.Printf("[%s] Processing block %d with %d transactions",
+				tron.NetworkCode, blockNum, len(block.Transactions))
 
-			switch contract.Type {
-			// TRX token
-			case core.Transaction_Contract_TransferContract:
-				// Get transfer contract entity
-				transferContract := &core.TransferContract{}
-				err := proto.Unmarshal(contract.Parameter.Value, transferContract)
+			// Local goroutine tx list (one for every block)
+			localTxList := make([]*InboundTransaction, 0, len(block.Transactions))
+
+			// Process transactions in block
+			for _, tx := range block.Transactions {
+				if tx.Transaction.RawData == nil || len(tx.Transaction.RawData.Contract) == 0 {
+					log.Printf("[%s] Skipping block %d: no contract found", tron.NetworkCode, blockNum)
+					continue
+				}
+
+				// Get tx id
+				txId := fmt.Sprintf("%x", tx.GetTxid())
+				txInfo, err := tron.Client.GetTransactionInfoByID(txId)
 				if err != nil {
-					log.Printf("Failed to unmarshal transfer contract: %v", err)
+					log.Printf("[%s] Failed to get transaction info: %v", tron.NetworkCode, err)
 					continue
 				}
 
-				if transferContract.OwnerAddress == nil || transferContract.ToAddress == nil {
-					log.Printf("Error getting transfer contract owner address and to address: %v", err)
+				// Check status (SUCCESS = 1)
+				if txInfo.Receipt.Result != core.Transaction_Result_SUCCESS {
+					log.Printf("[%s] Transaction '%s' failed with status %v", tron.NetworkCode, txId, txInfo.Receipt.Result)
 					continue
 				}
 
-				// Get from and to address
-				fromAddr := address.Address(transferContract.OwnerAddress).String()
-				toAddr := address.Address(transferContract.ToAddress).String()
+				// Get contract entity and tx id
+				contract := tx.Transaction.RawData.Contract[0]
 
-				// Check if address exists in network addresses list
-				if userId, ok := addressList[toAddr]; ok {
-					txList = append(txList, map[string]any{
-						"user_id":  userId,
-						"currency": "TRX",
-						"txId":     txId,
-						"from":     fromAddr,
-						"to":       toAddr,
-						"amount":   transferContract.Amount,
-					})
-				}
+				switch contract.Type {
+				// TRX token
+				case core.Transaction_Contract_TransferContract:
+					// Get transfer contract entity
+					transferContract := &core.TransferContract{}
+					err := proto.Unmarshal(contract.Parameter.Value, transferContract)
+					if err != nil {
+						log.Printf("[%s] Failed to unmarshal transfer contract: %v", tron.NetworkCode, err)
+						continue
+					}
 
-			// TRC20 token
-			case core.Transaction_Contract_TriggerSmartContract:
-				// Get trigger contract entity
-				triggerContract := &core.TriggerSmartContract{}
-				err := proto.Unmarshal(contract.Parameter.Value, triggerContract)
-				if err != nil {
-					log.Printf("Failed to unmarshal trigger smart contract: %v", err)
-					continue
-				}
+					if transferContract.OwnerAddress == nil || transferContract.ToAddress == nil {
+						log.Printf("[%s] Error getting transfer contract owner and to address: %v", tron.NetworkCode, err)
+						continue
+					}
 
-				// Get contract address
-				contractAddr := address.Address(triggerContract.ContractAddress).String()
+					// Get from and to address
+					fromAddr := address.Address(transferContract.OwnerAddress).String()
+					toAddr := address.Address(transferContract.ToAddress).String()
 
-				// Get token name by contract address
-				token, err := config.GetTokenByContractAddr(tron.NetworkCode, contractAddr)
-				if err != nil {
-					log.Printf("Unknown contract address: %s", contractAddr)
-					continue
-				}
+					// Check if address exists in network addresses list
+					if userId, ok := addressList[toAddr]; ok {
+						// Get converted amount (in TRX)
+						amount, _ := decimals.RemoveDecimals(big.NewInt(transferContract.Amount), trxDecimals).Float64()
 
-				if triggerContract.OwnerAddress == nil {
-					log.Printf("Error getting trigger smart contract owner address: %v", err)
-					continue
-				}
+						localTxList = append(localTxList, &InboundTransaction{
+							UserId:   int(userId),
+							Currency: "TRX",
+							TxId:     txId,
+							From:     fromAddr,
+							To:       toAddr,
+							Amount:   amount,
+						})
+					}
 
-				// Check if it's transfer contract method (method selector: a9059cbb)
-				if len(triggerContract.Data) >= 4 {
-					methodId := fmt.Sprintf("%x", triggerContract.Data[0:4])
-					if methodId == "a9059cbb" && len(triggerContract.Data) == 68 {
-						// Extract to address (32 bytes after 4 method id bytes + 12 padding bytes)
-						toAddrBytes := triggerContract.Data[16:36]
+				// TRC20 token
+				case core.Transaction_Contract_TriggerSmartContract:
+					// Get trigger contract entity
+					triggerContract := &core.TriggerSmartContract{}
+					err := proto.Unmarshal(contract.Parameter.Value, triggerContract)
+					if err != nil {
+						log.Printf("[%s] Failed to unmarshal trigger smart contract: %v", tron.NetworkCode, err)
+						continue
+					}
 
-						// Get from and to address
-						fromAddr := address.Address(triggerContract.OwnerAddress).String()
-						toAddr := address.Address(toAddrBytes).String()
+					// Get contract address
+					contractAddr := address.Address(triggerContract.ContractAddress).String()
 
-						// Check if address exists in network addresses list
-						if userId, ok := addressList[toAddr]; ok {
-							// Extract amount (last 32 bytes)
-							rawAmount := new(big.Int).SetBytes(triggerContract.Data[36:68])
+					// Get token name by contract address
+					token, err := config.GetTokenByContractAddr(tron.NetworkCode, contractAddr)
+					if err != nil {
+						continue
+					}
 
-							// Get contract decimals
-							decimalsValue, err := tron.Client.TRC20GetDecimals(contractAddr)
-							if err != nil {
-								log.Printf("Failed to get contract decimals: %v", err)
-								continue
+					if triggerContract.OwnerAddress == nil {
+						log.Printf("[%s] Error getting trigger smart contract owner address: %v", tron.NetworkCode, err)
+						continue
+					}
+
+					// Check if it's an TRC20 token transfer
+					// Data structure: 4 bytes method ID + 32 bytes address + 32 bytes amount
+					if len(triggerContract.Data) == 68 {
+						// Check if method is transfer (a9059cbb)
+						methodId := fmt.Sprintf("%x", triggerContract.Data[0:4])
+						if methodId == "a9059cbb" {
+							// Extract to address (bytes 4-36, take last 20 bytes)
+							toAddrBytes := triggerContract.Data[16:36]
+
+							// Get from and to address
+							fromAddr := address.Address(triggerContract.OwnerAddress).String()
+							toAddr := address.Address(toAddrBytes).String()
+
+							// Check if address exists in network addresses list
+							if userId, ok := addressList[toAddr]; ok {
+								// Get contract decimals from cache or fetch from contract
+								decimalsCacheMu.RLock()
+								cached, exists := decimalsCache[contractAddr]
+								decimalsCacheMu.RUnlock()
+
+								var decimalsValue int64
+								if exists {
+									// Get contract decimals from cache
+									decimalsValue = cached
+								} else {
+									// Fetch decimals from contract
+									decimalsResult, err := tron.Client.TRC20GetDecimals(contractAddr)
+									if err != nil {
+										log.Printf("[%s] Failed to get contract decimals for '%s': %v",
+											tron.NetworkCode, contractAddr, err)
+										continue
+									}
+									decimalsValue = decimalsResult.Int64()
+
+									// Save decimals to cache
+									decimalsCacheMu.Lock()
+									decimalsCache[contractAddr] = decimalsValue
+									decimalsCacheMu.Unlock()
+								}
+
+								// Extract amount (bytes 36-68)
+								rawAmount := new(big.Int).SetBytes(triggerContract.Data[36:68])
+								// Get converted amount
+								amount, _ := decimals.RemoveDecimals(rawAmount, decimalsValue).Float64()
+
+								localTxList = append(localTxList, &InboundTransaction{
+									UserId:   int(userId),
+									Currency: token,
+									TxId:     txId,
+									From:     fromAddr,
+									To:       toAddr,
+									Amount:   amount,
+								})
 							}
-
-							// Get converted amount
-							amount, _ := decimals.RemoveDecimals(rawAmount, decimalsValue.Int64()).Float64()
-
-							txList = append(txList, map[string]any{
-								"user_id":  userId,
-								"currency": token,
-								"txId":     txId,
-								"from":     fromAddr,
-								"to":       toAddr,
-								"amount":   amount,
-							})
 						}
 					}
 				}
 			}
+
+			// Mark the block as successfully processed
+			successfulBlocks.Store(blockNum, true)
+			// Send batch to result channel (one send for block)
+			resultChan <- localTxList
+		}()
+	}
+
+	// Waiting for results
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+
+	// Collect results from batches
+	txList := make([]*InboundTransaction, 0)
+	for batch := range resultChan {
+		txList = append(txList, batch...)
+	}
+
+	// Get the last continuously successful block
+	// This ensures that we don't miss blocks the next time we run
+	lastContinuousBlock := lastBlockNumber
+	for blockNum := lastBlockNumber + 1; blockNum <= currentBlockNum; blockNum++ {
+		if _, ok := successfulBlocks.Load(blockNum); ok {
+			lastContinuousBlock = blockNum
+		} else {
+			// Stop, if found the first failed block
+			log.Printf("[%s] Block %d was not processed successfully, stopping at %d",
+				tron.NetworkCode, blockNum, lastContinuousBlock)
+			break
 		}
 	}
 
-	// Set last block number to current block
-	lastBlockNumber = currentBlockNum
-	// Save new value in Redis
-	redis.GetClient().HSet(context.Background(), "last_blocks", tron.NetworkCode, lastBlockNumber)
+	// Save last processed block in Redis
+	if lastContinuousBlock > lastBlockNumber {
+		err = redis.GetClient().HSet(ctx, "last_blocks", tron.NetworkCode, lastContinuousBlock)
+		if err != nil {
+			return nil, fmt.Errorf("[%s] Failed to save last block in Redis: %w", tron.NetworkCode, err)
+		}
+	}
+	log.Printf("[%s] Processed %d transactions successful", tron.NetworkCode, len(txList))
 
 	return txList, nil
 }
@@ -500,7 +603,10 @@ func (tron *Tron) getNativeBalance(addr string) (float64, error) {
 	rawBalance := big.NewInt(account.Balance)
 
 	// Get TRX decimals
-	trxDecimals, _ := config.GetChainSetting[int64](config.TokenSettings, fmt.Sprintf("%s.TRX.decimals", tron.NetworkCode))
+	trxDecimals, _ := config.GetChainSetting[int64](
+		config.TokenSettings,
+		fmt.Sprintf("%s.%s.decimals", tron.NetworkCode, "TRX"),
+	)
 	// Get converted balance (in TRX)
 	trxBalance, _ := decimals.RemoveDecimals(rawBalance, trxDecimals).Float64()
 
@@ -531,7 +637,7 @@ func (tron *Tron) getTrc20Balance(contractAddr, addr string) (float64, error) {
 
 /* GetTransactionCommission private methods group */
 // @private calcNativeFee Calc fee for TRX transaction
-// fromAddr: From wallet address
+// fromAddr: Wallet address
 // toAddr: Address for withdrawal
 // amount: Amount in float value
 // Returns: Fee in TRX
@@ -543,7 +649,10 @@ func (tron *Tron) calcNativeFee(fromAddr, toAddr string, amount float64) (float6
 	}
 
 	// Get TRX decimals
-	trxDecimals, _ := config.GetChainSetting[int64](config.TokenSettings, fmt.Sprintf("%s.TRX.decimals", tron.NetworkCode))
+	trxDecimals, _ := config.GetChainSetting[int64](
+		config.TokenSettings,
+		fmt.Sprintf("%s.%s.decimals", tron.NetworkCode, "TRX"),
+	)
 	// Convert amount to SUN
 	amountSun, _ := decimals.ApplyDecimals(big.NewFloat(amount), trxDecimals)
 
@@ -600,7 +709,7 @@ func (tron *Tron) calcNativeFee(fromAddr, toAddr string, amount float64) (float6
 
 // @private calcTrc20Fee Calc fee for TRC20 token transaction
 // currency: Token ticker
-// fromAddr: From wallet address
+// fromAddr: Wallet address
 // toAddr: Address for withdrawal
 // amount: Amount in float value
 // Returns: Fee in TRX
@@ -612,7 +721,10 @@ func (tron *Tron) calcTrc20Fee(currency, fromAddr, toAddr string, amount float64
 	}
 
 	// Get token contract address
-	contractAddr, err := config.GetChainSetting[string](config.ContractsAddresses, fmt.Sprintf("%s.currency", tron.NetworkCode))
+	contractAddr, err := config.GetChainSetting[string](
+		config.ContractsAddresses,
+		fmt.Sprintf("%s.currency", tron.NetworkCode),
+	)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get contract address for %s: %w", currency, err)
 	}
@@ -630,13 +742,15 @@ func (tron *Tron) calcTrc20Fee(currency, fromAddr, toAddr string, amount float64
 	energyEstimate, err := tron.Client.EstimateEnergy(
 		fromAddr, contractAddr,
 		"transfer(address,uint256)",
-		fmt.Sprintf(`[{"type":"address","value":"%s"},{"type":"uint256","value":"%s"}]`,
-			toAddr, amountSun.String()),
+		fmt.Sprintf(`[{"type":"address","value":"%s"},{"type":"uint256","value":"%s"}]`, toAddr, amountSun.String()),
 		0, "", 0,
 	)
 	// If err returned, get needed energy value from config
 	if err != nil {
-		energyNeeded, err = config.GetChainSetting[int64](config.TokenSettings, fmt.Sprintf("%s.currency.estimated_energy", tron.NetworkCode))
+		energyNeeded, err = config.GetChainSetting[int64](
+			config.TokenSettings,
+			fmt.Sprintf("%s.%s.estimated_energy", tron.NetworkCode, currency),
+		)
 		if err != nil {
 			return 0, fmt.Errorf("failed to get estimated_energy for %s from config: %w", currency, err)
 		}
@@ -656,8 +770,7 @@ func (tron *Tron) calcTrc20Fee(currency, fromAddr, toAddr string, amount float64
 	tx, err := tron.Client.TriggerContract(
 		fromAddr, contractAddr,
 		"transfer(address,uint256)",
-		fmt.Sprintf(`[{"type":"address","value":"%s"},{"type":"uint256","value":"%s"}]`,
-			toAddr, amountSun.String()),
+		fmt.Sprintf(`[{"type":"address","value":"%s"},{"type":"uint256","value":"%s"}]`, toAddr, amountSun.String()),
 		0, 0, "", 0,
 	)
 	if err != nil {
@@ -707,7 +820,10 @@ func (tron *Tron) calcTrc20Fee(currency, fromAddr, toAddr string, amount float64
 	// Get total fee in SUN
 	totalFeeUnits := energyCost + bandwidthCost
 	// Get TRX decimals
-	trxDecimals, _ := config.GetChainSetting[int64](config.TokenSettings, fmt.Sprintf("%s.TRX.decimals", tron.NetworkCode))
+	trxDecimals, _ := config.GetChainSetting[int64](
+		config.TokenSettings,
+		fmt.Sprintf("%s.%s.decimals", tron.NetworkCode, "TRX"),
+	)
 	// Convert total fee to TRX
 	totalFee, _ := decimals.RemoveDecimals(big.NewInt(totalFeeUnits), trxDecimals).Float64()
 
@@ -739,14 +855,17 @@ func (tron *Tron) getCurrentChainParams() (map[string]int64, error) {
 
 /* SendTransaction private methods group */
 // @private sendNative Send native TRX transaction
-// fromAddr: From wallet address
+// fromAddr: Wallet address
 // toAddr: Address for withdrawal
 // amount: Amount in float value
 // privateKey: Wallet private key
 // Returns: Transaction hash
 func (tron *Tron) sendNative(fromAddr, toAddr string, amount float64, privateKey string) (string, error) {
 	// Get TRX decimals
-	trxDecimals, _ := config.GetChainSetting[int64](config.TokenSettings, fmt.Sprintf("%s.TRX.decimals", tron.NetworkCode))
+	trxDecimals, _ := config.GetChainSetting[int64](
+		config.TokenSettings,
+		fmt.Sprintf("%s.%s.decimals", tron.NetworkCode, "TRX"),
+	)
 	// Convert amount to SUN including decimals
 	amountSun, _ := decimals.ApplyDecimals(big.NewFloat(amount), trxDecimals)
 
@@ -762,14 +881,17 @@ func (tron *Tron) sendNative(fromAddr, toAddr string, amount float64, privateKey
 
 // @private sendTrc20 Send TRC20 token transaction
 // currency: Token ticker
-// fromAddr: From wallet address
+// fromAddr: Wallet address
 // toAddr: Address for withdrawal
 // amount: Amount in float value
 // privateKey: Wallet private key
 // Returns: Transaction hash
 func (tron *Tron) sendTrc20(currency, fromAddr, toAddr string, amount float64, privateKey string) (string, error) {
 	// Get token contract address
-	contractAddr, err := config.GetChainSetting[string](config.ContractsAddresses, fmt.Sprintf("%s.%s", tron.NetworkCode, currency))
+	contractAddr, err := config.GetChainSetting[string](
+		config.ContractsAddresses,
+		fmt.Sprintf("%s.%s", tron.NetworkCode, currency),
+	)
 	if err != nil {
 		return "", fmt.Errorf("failed to get contract address: %w", err)
 	}
@@ -815,6 +937,7 @@ func (tron *Tron) signAndBroadcast(tx *api.TransactionExtention, privateKey stri
 		return "", fmt.Errorf("failed to broadcast %s transaction: %w", tron.NetworkCode, err)
 	}
 
+	// Check result and return transaction hash
 	if !result.Result || result.Code != api.Return_SUCCESS {
 		return "", fmt.Errorf("%s transaction failed: [%d] %s", tron.NetworkCode, result.Code, result.Message)
 	}

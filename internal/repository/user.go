@@ -30,17 +30,17 @@ func (r *UserRepository) GetList() ([]models.User, error) {
 	return users, nil
 }
 
-// GetNumberByUserId Get number by user id
-func (r *UserRepository) GetNumberByUserId(userId int) (string, error) {
+// GetUserIdByNumber Get user id by number
+func (r *UserRepository) GetUserIdByNumber(number string) (uint, error) {
 	var user models.User
 
-	err := r.db.Where("user_id = ?", userId).
+	err := r.db.Where("number = ?", number).
 		Find(&user).Error
 	if err != nil {
-		return "", err
+		return 0, err
 	}
 
-	return user.Number, nil
+	return user.UserId, nil
 }
 
 // Create new user

@@ -52,12 +52,12 @@ func (r *TaskRegistry) initializeDefinitions() []*TaskDefinition {
 		true,
 	))
 
-	// Process refills (every 10 seconds)
+	// Process inbound transactions (every 30 seconds)
 	definitions = append(definitions, NewTaskDefinition(
 		NewRefillsTask(),
 		TaskSchedule{
 			Type:               ScheduleTypeInterval,
-			Interval:           "10s",
+			Interval:           "30s",
 			SkipIfStillRunning: true,
 		},
 		true,
