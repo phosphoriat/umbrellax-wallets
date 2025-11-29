@@ -109,7 +109,7 @@ func (eth *Ethereum) GetMasterWallet() (map[string]any, error) {
 	}
 	masterAddr := masterData["address"].(string)
 
-	// Get ERC20 tokens balances
+	// Get ERC20 token balances
 	balances := make(map[string]any)
 	for token, contractAddr := range config.ContractsAddresses[eth.NetworkCode].(map[string]string) {
 		tokenBalance, _ := eth.getErc20Balance(contractAddr, masterAddr)
@@ -189,7 +189,7 @@ func (eth *Ethereum) GetTransactionCommission(
 
 // GetTransactionStatus Get transaction status by hash
 // hash: Transaction hash
-// Returns: Transaction status
+// Returns: Transaction status (success/pending/failed)
 func (eth *Ethereum) GetTransactionStatus(hash, toAddr string) (string, error) {
 	_, isPending, err := eth.Client.TransactionByHash(context.Background(), common.HexToHash(hash))
 	if err != nil {
@@ -297,7 +297,7 @@ func (eth *Ethereum) GetInboundTransactions() ([]*InboundTransaction, error) {
 	// Get ETH decimals from config
 	ethDecimals, err := config.GetChainSetting[int64](
 		config.TokenSettings,
-		fmt.Sprintf("%s.ETH.decimals", eth.NetworkCode),
+		fmt.Sprintf("%s.%s.decimals", eth.NetworkCode, "ETH"),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("[%s] Failed to get ETH decimals from config: %w", eth.NetworkCode, err)
@@ -316,7 +316,7 @@ func (eth *Ethereum) GetInboundTransactions() ([]*InboundTransaction, error) {
 		return nil, fmt.Errorf("[%s] Failed to parse ERC20 ABI from config: %w", eth.NetworkCode, err)
 	}
 
-	// Cache for contract decimals
+	// Cache for token decimals
 	decimalsCache := make(map[string]int64)
 	var decimalsCacheMu sync.RWMutex
 
@@ -668,6 +668,8 @@ func (eth *Ethereum) calcNativeFee(fromAddr, toAddr string, amount float64) (flo
 // amount: Amount in float value
 // Returns: Fee in ETH
 func (eth *Ethereum) calcErc20Fee(currency, fromAddr, toAddr string, amount float64) (float64, error) {
+	currency = strings.ToUpper(currency)
+
 	// Get token contract address
 	contractAddr, err := config.GetChainSetting[string](
 		config.ContractsAddresses,
@@ -727,10 +729,10 @@ func (eth *Ethereum) calcErc20Fee(currency, fromAddr, toAddr string, amount floa
 
 	// Get total fee in WEI
 	totalFeeWei := new(big.Int).Mul(gasPrice, new(big.Int).SetUint64(gasLimit))
-	// Get WEI decimals from config
+	// Get ETH decimals from config
 	weiDecimals, _ := config.GetChainSetting[int64](
 		config.TokenSettings,
-		fmt.Sprintf("%s.ETH.decimals", eth.NetworkCode),
+		fmt.Sprintf("%s.%s.decimals", eth.NetworkCode, "ETH"),
 	)
 	// Return converted total fee in ETH
 	return utils.RemoveDecimals(totalFeeWei, weiDecimals), nil
@@ -744,6 +746,21 @@ func (eth *Ethereum) calcErc20Fee(currency, fromAddr, toAddr string, amount floa
 // privateKey: Wallet private key
 // Returns: Transaction hash
 func (eth *Ethereum) sendNative(fromAddr, toAddr string, amount float64, privateKey string) (string, error) {
+	// Get ETH balance
+	trxBalance, err := eth.getNativeBalance(fromAddr)
+	if err != nil {
+		return "", fmt.Errorf("failed to get ETH balance: %w", err)
+	}
+	// Get tx fee (in ETH)
+	txFee, err := eth.calcNativeFee(fromAddr, toAddr, amount)
+	if err != nil {
+		return "", fmt.Errorf("failed to get ETH tx fee: %w", err)
+	}
+	// Check ETH balance before sending
+	if trxBalance < amount+txFee {
+		return "", fmt.Errorf("insufficient balance: have %f %s, need %f + %f %s", trxBalance, "ETH", amount, txFee, "ETH")
+	}
+
 	// Get ETH decimals from config
 	weiDecimals, _ := config.GetChainSetting[int64](
 		config.TokenSettings,
@@ -788,8 +805,8 @@ func (eth *Ethereum) sendNative(fromAddr, toAddr string, amount float64, private
 		Data:     nil,
 	})
 
-	// Sign, broadcast transaction to the network and return hash
-	return eth.signAndBroadcast(tx, privateKey)
+	// Sign and send transaction to the network
+	return eth.signAndSend(tx, privateKey)
 }
 
 // @private sendErc20 Send ERC20 token transaction
@@ -800,6 +817,8 @@ func (eth *Ethereum) sendNative(fromAddr, toAddr string, amount float64, private
 // privateKey: Wallet private key
 // Returns: Transaction hash
 func (eth *Ethereum) sendErc20(currency, fromAddr, toAddr string, amount float64, privateKey string) (string, error) {
+	currency = strings.ToUpper(currency)
+
 	// Get token contract address
 	contractAddr, err := config.GetChainSetting[string](
 		config.ContractsAddresses,
@@ -807,6 +826,28 @@ func (eth *Ethereum) sendErc20(currency, fromAddr, toAddr string, amount float64
 	)
 	if err != nil {
 		return "", fmt.Errorf("failed to get contract address: %w", err)
+	}
+
+	// Get ETH and token balances
+	ethBalance, err := eth.getNativeBalance(fromAddr)
+	if err != nil {
+		return "", fmt.Errorf("failed to get ETH balance: %w", err)
+	}
+	erc20Balance, err := eth.getErc20Balance(contractAddr, fromAddr)
+	if err != nil {
+		return "", fmt.Errorf("failed to get %s balance: %w", currency, err)
+	}
+	// Get tx fee (in ETH)
+	txFee, err := eth.calcErc20Fee(currency, fromAddr, toAddr, amount)
+	if err != nil {
+		return "", fmt.Errorf("failed to get %s tx fee: %w", currency, err)
+	}
+	// Check ETH and currency balances before sending
+	if ethBalance < txFee {
+		return "", fmt.Errorf("insufficient ETH balance: have %f %s, need %f %s", ethBalance, "ETH", txFee, "ETH")
+	}
+	if erc20Balance < amount {
+		return "", fmt.Errorf("insufficient currency balance: have %f %s, need %f %s", erc20Balance, currency, amount, currency)
 	}
 
 	// Get token ABI from config
@@ -873,15 +914,15 @@ func (eth *Ethereum) sendErc20(currency, fromAddr, toAddr string, amount float64
 		Data:     data,
 	})
 
-	// Sign, broadcast transaction to the network and return hash
-	return eth.signAndBroadcast(tx, privateKey)
+	// Sign and send transaction to the network
+	return eth.signAndSend(tx, privateKey)
 }
 
-// @private signAndBroadcast Sign and broadcast transaction to the network
+// @private signAndSend Sign and send transaction to the network
 // tx: Transaction struct
 // privateKey: Wallet private key
 // Returns: Transaction hash
-func (eth *Ethereum) signAndBroadcast(tx *types.Transaction, privateKey string) (string, error) {
+func (eth *Ethereum) signAndSend(tx *types.Transaction, privateKey string) (string, error) {
 	// Convert hex private key string to *ecdsa.PrivateKey
 	ecdsaPk, err := crypto.HexToECDSA(privateKey)
 	if err != nil {

@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"wallets/internal/config"
 	"wallets/internal/database/redis"
@@ -118,7 +119,7 @@ func (ton *Ton) GetMasterWallet() (map[string]any, error) {
 		return nil, fmt.Errorf("failed to init wallet instance: %w", err)
 	}
 
-	// Get Jetton tokens balances
+	// Get Jetton token balances
 	balances := make(map[string]any)
 	for token, contractAddr := range config.ContractsAddresses[ton.NetworkCode].(map[string]string) {
 		tokenBalance, _ := ton.getJettonBalance(token, contractAddr, masterAddr)
@@ -207,51 +208,74 @@ func (ton *Ton) GetTransactionCommission(
 // GetTransactionStatus Get transaction status by hash
 // hash: Transaction hash
 // toAddr: Recipient wallet address (required)
-// Returns: Transaction status (always success)
+// Returns: Transaction status (success/pending)
 func (ton *Ton) GetTransactionStatus(hash, toAddr string) (string, error) {
 	if toAddr == "" {
 		return "", fmt.Errorf("to address is required")
 	}
 
 	ctx := context.Background()
-	to := address.MustParseAddr(toAddr)
 
-	// Get master chain info
+	// Parse to address
+	to, err := address.ParseAddr(toAddr)
+	if err != nil {
+		return "", fmt.Errorf("invalid recipient address: %w", err)
+	}
+	// Decode hash for comparison
+	hashBytes, err := base64.StdEncoding.DecodeString(hash)
+	if err != nil {
+		return "", fmt.Errorf("invalid transaction hash: %w", err)
+	}
+
+	// Get current masterchain info
 	chainInfo, err := ton.Client.CurrentMasterchainInfo(ctx)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to get masterchain info: %w", err)
 	}
+
 	// Get account info
 	account, err := ton.Client.GetAccount(ctx, chainInfo, to)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to get account info: %w", err)
 	}
 
-	// Get last LT and tx hash from account as global batch params
+	// Init pagination params from account's last transaction
 	lt := account.LastTxLT
 	txHash := account.LastTxHash
 
-	for {
-		// Get transaction batch for current batch params
+	// Iterate transaction history (max 100 iterations)
+	for i := 0; i < 100; i++ {
+		// Get transaction batch (20 transaction per request)
 		txs, err := ton.Client.ListTransactions(ctx, to, 20, lt, txHash)
 		if err != nil {
-			return "", err
-		}
-		if len(txs) == 0 {
-			return "failed", nil
+			return "", fmt.Errorf("failed to list transactions: %w", err)
 		}
 
+		// No more transactions in history - not found, assuming still pending
+		if len(txs) == 0 {
+			return "pending", nil
+		}
+
+		// Search for matching hash in current batch
 		for _, tx := range txs {
-			if hex.EncodeToString(tx.Hash) == hash {
+			if bytes.Equal(tx.Hash, hashBytes) {
 				return "success", nil
 			}
 		}
 
-		// Set latest LT and tx hash to batch params
-		// txs[0] - the oldest value in batch
+		// Get the oldest transaction for next iteration
 		oldest := txs[0]
+		// Check for end of history (no progress) - transaction not found
+		if oldest.LT == lt && bytes.Equal(oldest.Hash, txHash) {
+			return "pending", nil
+		}
+
+		// Update pagination params
 		lt, txHash = oldest.LT, oldest.Hash
 	}
+
+	// Max iterations reached - assuming still pending
+	return "pending", nil
 }
 
 // SendTransaction Send transaction to the network
@@ -335,7 +359,7 @@ func (ton *Ton) GetInboundTransactions() ([]*InboundTransaction, error) {
 		fmt.Sprintf("%s.%s.decimals", ton.NetworkCode, "TON"),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("[%s] Failed to get %s decimals from config: %w", ton.NetworkCode, "ton", err)
+		return nil, fmt.Errorf("[%s] Failed to get %s decimals from config: %w", ton.NetworkCode, "TON", err)
 	}
 
 	// Cache for jetton info
@@ -659,6 +683,7 @@ func (ton *Ton) getNativeBalance(walletInstance *wallet.Wallet) (float64, error)
 // Returns: Jetton token wallet balance
 func (ton *Ton) getJettonBalance(currency, contractAddr, walletAddr string) (float64, error) {
 	ctx := context.Background()
+	currency = strings.ToUpper(currency)
 
 	// Get master jetton client
 	jettonMaster := jetton.NewJettonMasterClient(ton.Client, address.MustParseAddr(contractAddr))
@@ -678,7 +703,7 @@ func (ton *Ton) getJettonBalance(currency, contractAddr, walletAddr string) (flo
 	// Get jetton decimals from config
 	decimals, err := config.GetChainSetting[int](
 		config.TokenSettings,
-		fmt.Sprintf("%s.%s.decimals", ton.NetworkCode, strings.ToUpper(currency)),
+		fmt.Sprintf("%s.%s.decimals", ton.NetworkCode, currency),
 	)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get %s decimals: %w", currency, err)
@@ -712,19 +737,16 @@ func (ton *Ton) calcNativeFee(walletInstance *wallet.Wallet, toAddr string, amou
 	}
 
 	// Build external message
-	extMessage, err := walletInstance.BuildExternalMessage(
-		ctx,
-		wallet.SimpleMessage(
-			address.MustParseAddr(toAddr), // To address
-			amountConverted,               // Amount (in nanoTON)
-			body,                          // Message payload
-		),
-	)
+	extMessage, err := walletInstance.BuildExternalMessage(ctx, wallet.SimpleMessage(
+		address.MustParseAddr(toAddr), // To address
+		amountConverted,               // Amount (in nanoTON)
+		body,                          // Message payload
+	))
 	if err != nil {
 		return 0, fmt.Errorf("failed to build external message: %w", err)
 	}
 
-	// Return total fee
+	// Send fee estimation request and return total fee
 	return ton.sendCalcFeeRequest(walletInstance.WalletAddress(), extMessage)
 }
 
@@ -737,6 +759,7 @@ func (ton *Ton) calcNativeFee(walletInstance *wallet.Wallet, toAddr string, amou
 // Returns: Fee in TON
 func (ton *Ton) calcJettonFee(walletInstance *wallet.Wallet, currency, toAddr string, amount float64, memo string) (float64, error) {
 	ctx := context.Background()
+	currency = strings.ToUpper(currency)
 
 	// Get token contract address
 	contractAddr, err := config.GetChainSetting[string](
@@ -777,7 +800,7 @@ func (ton *Ton) calcJettonFee(walletInstance *wallet.Wallet, currency, toAddr st
 	// Get jetton decimals from config
 	decimals, err := config.GetChainSetting[int](
 		config.TokenSettings,
-		fmt.Sprintf("%s.%s.decimals", ton.NetworkCode, strings.ToUpper(currency)),
+		fmt.Sprintf("%s.%s.decimals", ton.NetworkCode, currency),
 	)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get %s decimals: %w", currency, err)
@@ -808,19 +831,16 @@ func (ton *Ton) calcJettonFee(walletInstance *wallet.Wallet, currency, toAddr st
 	}
 
 	// Build external message
-	extMessage, err := walletInstance.BuildExternalMessage(
-		ctx,
-		wallet.SimpleMessage(
-			jettonWallet.Address(), // Jetton wallet address
-			messageTonAmount,       // Message TON amount (in nanoTON)
-			payload,                // Transfer payload
-		),
-	)
+	extMessage, err := walletInstance.BuildExternalMessage(ctx, wallet.SimpleMessage(
+		jettonWallet.Address(), // Jetton wallet address
+		messageTonAmount,       // Message TON amount (in nanoTON)
+		payload,                // Transfer payload
+	))
 	if err != nil {
 		return 0, fmt.Errorf("failed to build external message: %w", err)
 	}
 
-	// Return total fee
+	// Send fee estimation request and return total fee
 	return ton.sendCalcFeeRequest(walletInstance.WalletAddress(), extMessage)
 }
 
@@ -829,39 +849,58 @@ func (ton *Ton) calcJettonFee(walletInstance *wallet.Wallet, currency, toAddr st
 // extMessage: External message instance
 // Returns: Total fee in TON
 func (ton *Ton) sendCalcFeeRequest(fromAddr *address.Address, extMessage *tlb.ExternalMessage) (float64, error) {
+	// Load config
+	cfg, err := config.Load()
+	if err != nil {
+		return 0, fmt.Errorf("failed to load config: %w", err)
+	}
+
 	// Convert message to BOC in base64
 	bocBase64 := base64.StdEncoding.EncodeToString(extMessage.Body.ToBOC())
-	// Set params for request
-	reqBody, _ := json.Marshal(map[string]any{
+
+	// Build request body
+	reqBody, err := json.Marshal(map[string]any{
 		"address":       fromAddr,
 		"body":          bocBase64,
 		"ignore_chksig": true,
 	})
+	if err != nil {
+		return 0, fmt.Errorf("failed to marshal request body: %w", err)
+	}
 
-	// Build HTTP request
-	cfg, _ := config.Load()
-	httpReq, err := http.NewRequest("POST", cfg.TonRpcUrl+"/estimateFee", bytes.NewReader(reqBody))
+	// Create HTTP request with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", cfg.TonRpcUrl+"/estimateFee", bytes.NewReader(reqBody))
 	if err != nil {
 		return 0, fmt.Errorf("failed to build http request: %w", err)
 	}
 
-	// Set additional headers
-	httpReq.Header.Set("accept", "application/json")
-	httpReq.Header.Set("content-type", "application/json")
-	httpReq.Header.Set("x-api-key", cfg.TatumApiKey)
+	// Set headers
+	httpReq.Header.Set("Accept", "application/json")
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-Api-Key", cfg.TatumApiKey)
 
-	// Send estimateFee HTTP request to RPC provider
+	// Send HTTP request to RPC provider
 	response, err := http.DefaultClient.Do(httpReq)
 	if err != nil {
-		return 0, fmt.Errorf("failed to get estimate fee from RPC provider: %w", err)
+		return 0, fmt.Errorf("failed to send estimate fee request: %w", err)
 	}
 	defer response.Body.Close()
 
+	// Check HTTP status
+	if response.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("estimate fee request failed with status: %d", response.StatusCode)
+	}
+
+	// Read response body
 	respBody, err := io.ReadAll(response.Body)
 	if err != nil {
 		return 0, fmt.Errorf("failed to read response body: %w", err)
 	}
 
+	// Parse response
 	var respData struct {
 		Result struct {
 			SourceFees struct {
@@ -870,25 +909,23 @@ func (ton *Ton) sendCalcFeeRequest(fromAddr *address.Address, extMessage *tlb.Ex
 				GasFee     int `json:"gas_fee"`
 				FwdFee     int `json:"fwd_fee"`
 			} `json:"source_fees"`
-			DestinationFees any `json:"destination_fees"`
 		} `json:"result"`
 	}
-	err = json.Unmarshal(respBody, &respData)
-	if err != nil {
+	if err = json.Unmarshal(respBody, &respData); err != nil {
 		return 0, fmt.Errorf("failed to unmarshal response body: %w", err)
 	}
 
 	// Calc total fee
-	total := big.NewInt(int64(respData.Result.SourceFees.InFwdFee + respData.Result.SourceFees.StorageFee +
-		respData.Result.SourceFees.GasFee + respData.Result.SourceFees.FwdFee))
+	fees := respData.Result.SourceFees
+	total := tlb.FromNanoTON(big.NewInt(int64(fees.InFwdFee + fees.StorageFee + fees.GasFee + fees.FwdFee))).String()
 
-	// Get TON decimals from config
-	tonDecimals, _ := config.GetChainSetting[int64](
-		config.TokenSettings,
-		fmt.Sprintf("%s.%s.decimals", ton.NetworkCode, "TON"),
-	)
-	// Return converted total fee
-	return utils.RemoveDecimals(total, tonDecimals), nil
+	// Parse total fee
+	totalFloat, err := strconv.ParseFloat(total, 64)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse total fee: %w", err)
+	}
+
+	return totalFloat, nil
 }
 
 /* SendTransaction private methods group */
@@ -897,7 +934,6 @@ func (ton *Ton) sendCalcFeeRequest(fromAddr *address.Address, extMessage *tlb.Ex
 // toAddr: Address for withdrawal
 // amount: Amount in float value
 // memo: Memo tag
-// privateKey: Wallet private key
 // Returns: Transaction hash
 func (ton *Ton) sendNative(walletInstance *wallet.Wallet, toAddr string, amount float64, memo string) (string, error) {
 	ctx := context.Background()
@@ -916,14 +952,11 @@ func (ton *Ton) sendNative(walletInstance *wallet.Wallet, toAddr string, amount 
 	}
 
 	// Send transaction and wait for confirmation
-	tx, _, err := walletInstance.SendWaitTransaction(
-		ctx,
-		wallet.SimpleMessage(
-			address.MustParseAddr(toAddr), // To address
-			amountConverted,               // Amount (in nanoTON)
-			body,                          // Message payload (comment)
-		),
-	)
+	tx, _, err := walletInstance.SendWaitTransaction(ctx, wallet.SimpleMessage(
+		address.MustParseAddr(toAddr), // To address
+		amountConverted,               // Amount (in nanoTON)
+		body,                          // Message payload (comment)
+	))
 	if err != nil {
 		return "", fmt.Errorf("failed to send transaction: %w", err)
 	}
@@ -938,10 +971,10 @@ func (ton *Ton) sendNative(walletInstance *wallet.Wallet, toAddr string, amount 
 // toAddr: Address for withdrawal
 // amount: Amount in float value
 // memo: Memo tag
-// privateKey: Wallet private key
 // Returns: Transaction hash
 func (ton *Ton) sendJetton(currency string, walletInstance *wallet.Wallet, toAddr string, amount float64, memo string) (string, error) {
 	ctx := context.Background()
+	currency = strings.ToUpper(currency)
 
 	// Get token contract address from config
 	contractAddr, err := config.GetChainSetting[string](
@@ -964,7 +997,7 @@ func (ton *Ton) sendJetton(currency string, walletInstance *wallet.Wallet, toAdd
 	// Get jetton decimals from config
 	decimals, err := config.GetChainSetting[int](
 		config.TokenSettings,
-		fmt.Sprintf("%s.%s.decimals", ton.NetworkCode, strings.ToUpper(currency)),
+		fmt.Sprintf("%s.%s.decimals", ton.NetworkCode, currency),
 	)
 	if err != nil {
 		return "", fmt.Errorf("failed to get %s decimals: %w", currency, err)
@@ -1012,15 +1045,12 @@ func (ton *Ton) sendJetton(currency string, walletInstance *wallet.Wallet, toAdd
 		return "", fmt.Errorf("failed to build transfer payload: %w", err)
 	}
 
-	// Create message to jetton wallet contract
-	msg := wallet.SimpleMessage(
+	// Send transaction and wait for confirmation
+	tx, _, err := walletInstance.SendWaitTransaction(ctx, wallet.SimpleMessage(
 		jettonWallet.Address(), // Jetton wallet address
 		messageTonAmount,       // Message TON amount (in nanoTON)
 		transferPayload,        // Transfer payload
-	)
-
-	// Send transaction and wait for confirmation
-	tx, _, err := walletInstance.SendWaitTransaction(ctx, msg)
+	))
 	if err != nil {
 		return "", fmt.Errorf("failed to send jetton transaction: %w", err)
 	}

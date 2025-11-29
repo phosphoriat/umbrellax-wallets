@@ -9,6 +9,7 @@ import (
 	"log"
 	"math/big"
 	"strconv"
+	"strings"
 	"sync"
 
 	"wallets/internal/config"
@@ -111,7 +112,7 @@ func (tron *Tron) GetMasterWallet() (map[string]any, error) {
 	}
 	masterAddr := masterData["address"].(string)
 
-	// Get trc20 tokens balances
+	// Get TRC20 token balances
 	balances := make(map[string]any)
 	for token, contractAddr := range config.ContractsAddresses[tron.NetworkCode].(map[string]string) {
 		tokenBalance, _ := tron.getTrc20Balance(contractAddr, masterAddr)
@@ -191,7 +192,7 @@ func (tron *Tron) GetTransactionCommission(
 
 // GetTransactionStatus Get transaction status by hash
 // hash: Transaction hash
-// Returns: Transaction status
+// Returns: Transaction status (success/pending/failed)
 func (tron *Tron) GetTransactionStatus(hash, toAddr string) (string, error) {
 	tx, err := tron.Client.GetTransactionByID(hash)
 	if err != nil {
@@ -295,7 +296,7 @@ func (tron *Tron) GetInboundTransactions() ([]*InboundTransaction, error) {
 		return nil, fmt.Errorf("[%s] Failed to get TRX decimals from config: %w", tron.NetworkCode, err)
 	}
 
-	// Cache for contract decimals
+	// Cache for token decimals
 	decimalsCache := make(map[string]int64)
 	var decimalsCacheMu sync.RWMutex
 
@@ -303,7 +304,7 @@ func (tron *Tron) GetInboundTransactions() ([]*InboundTransaction, error) {
 	var wg sync.WaitGroup
 	// Concurrent save map for successfully processed blocks
 	successfulBlocks := &sync.Map{}
-	// Channel for collect transactions from all blocks Канал для сбора транзакций из всех блоков
+	// Channel for collect transactions from all blocks
 	resultChan := make(chan []*InboundTransaction, currentBlockNum-lastBlockNumber)
 
 	log.Printf("[%s] Processing blocks %d to %d", tron.NetworkCode, lastBlockNumber+1, currentBlockNum)
@@ -714,6 +715,8 @@ func (tron *Tron) calcNativeFee(fromAddr, toAddr string, amount float64) (float6
 // amount: Amount in float value
 // Returns: Fee in TRX
 func (tron *Tron) calcTrc20Fee(currency, fromAddr, toAddr string, amount float64) (float64, error) {
+	currency = strings.ToUpper(currency)
+
 	// Get current chain params
 	chainParams, err := tron.getCurrentChainParams()
 	if err != nil {
@@ -723,7 +726,7 @@ func (tron *Tron) calcTrc20Fee(currency, fromAddr, toAddr string, amount float64
 	// Get token contract address
 	contractAddr, err := config.GetChainSetting[string](
 		config.ContractsAddresses,
-		fmt.Sprintf("%s.currency", tron.NetworkCode),
+		fmt.Sprintf("%s.%s", tron.NetworkCode, currency),
 	)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get contract address for %s: %w", currency, err)
@@ -857,10 +860,25 @@ func (tron *Tron) getCurrentChainParams() (map[string]int64, error) {
 // @private sendNative Send native TRX transaction
 // fromAddr: Wallet address
 // toAddr: Address for withdrawal
-// amount: Amount in float value
+// amount: Amount in float value (in TRX)
 // privateKey: Wallet private key
 // Returns: Transaction hash
 func (tron *Tron) sendNative(fromAddr, toAddr string, amount float64, privateKey string) (string, error) {
+	// Get TRX balance
+	trxBalance, err := tron.getNativeBalance(fromAddr)
+	if err != nil {
+		return "", fmt.Errorf("failed to get TRX balance: %w", err)
+	}
+	// Get tx fee (in TRX)
+	txFee, err := tron.calcNativeFee(fromAddr, toAddr, amount)
+	if err != nil {
+		return "", fmt.Errorf("failed to get TRX tx fee: %w", err)
+	}
+	// Check TRX balance before sending
+	if trxBalance < amount+txFee {
+		return "", fmt.Errorf("insufficient balance: have %f %s, need %f + %f %s", trxBalance, "TRX", amount, txFee, "TRX")
+	}
+
 	// Get TRX decimals
 	trxDecimals, _ := config.GetChainSetting[int64](
 		config.TokenSettings,
@@ -869,24 +887,26 @@ func (tron *Tron) sendNative(fromAddr, toAddr string, amount float64, privateKey
 	// Convert amount to SUN including decimals
 	amountSun, _ := decimals.ApplyDecimals(big.NewFloat(amount), trxDecimals)
 
-	// Create transaction
+	// Create TRX transaction
 	tx, err := tron.Client.Transfer(fromAddr, toAddr, amountSun.Int64())
 	if err != nil {
 		return "", fmt.Errorf("failed to create TRX transaction: %v", err)
 	}
 
-	// Sign, broadcast transaction to the network and return hash
-	return tron.signAndBroadcast(tx, privateKey)
+	// Sign and send transaction to the network
+	return tron.signAndSend(tx, privateKey)
 }
 
 // @private sendTrc20 Send TRC20 token transaction
 // currency: Token ticker
 // fromAddr: Wallet address
 // toAddr: Address for withdrawal
-// amount: Amount in float value
+// amount: Amount in float value (in currency value)
 // privateKey: Wallet private key
 // Returns: Transaction hash
 func (tron *Tron) sendTrc20(currency, fromAddr, toAddr string, amount float64, privateKey string) (string, error) {
+	currency = strings.ToUpper(currency)
+
 	// Get token contract address
 	contractAddr, err := config.GetChainSetting[string](
 		config.ContractsAddresses,
@@ -894,6 +914,28 @@ func (tron *Tron) sendTrc20(currency, fromAddr, toAddr string, amount float64, p
 	)
 	if err != nil {
 		return "", fmt.Errorf("failed to get contract address: %w", err)
+	}
+
+	// Get TRX and token balances
+	trxBalance, err := tron.getNativeBalance(fromAddr)
+	if err != nil {
+		return "", fmt.Errorf("failed to get TRX balance: %w", err)
+	}
+	trc20Balance, err := tron.getTrc20Balance(contractAddr, fromAddr)
+	if err != nil {
+		return "", fmt.Errorf("failed to get %s balance: %w", currency, err)
+	}
+	// Get tx fee (in TRX)
+	txFee, err := tron.calcTrc20Fee(currency, fromAddr, toAddr, amount)
+	if err != nil {
+		return "", fmt.Errorf("failed to get %s tx fee: %w", currency, err)
+	}
+	// Check TRX and currency balances before sending
+	if trxBalance < txFee {
+		return "", fmt.Errorf("insufficient TRX balance: have %f %s, need %f %s", trxBalance, "TRX", txFee, "TRX")
+	}
+	if trc20Balance < amount {
+		return "", fmt.Errorf("insufficient currency balance: have %f %s, need %f %s", trc20Balance, currency, amount, currency)
 	}
 
 	// Get contract decimals
@@ -910,15 +952,15 @@ func (tron *Tron) sendTrc20(currency, fromAddr, toAddr string, amount float64, p
 		return "", fmt.Errorf("failed to create USDT transaction: %v", err)
 	}
 
-	// Sign and broadcast transaction to the network
-	return tron.signAndBroadcast(tx, privateKey)
+	// Sign and send transaction to the network
+	return tron.signAndSend(tx, privateKey)
 }
 
-// @private signAndBroadcast Sign and broadcast transaction to the network
+// @private signAndSend Sign and send transaction to the network
 // tx: Transaction struct
 // privateKey: Wallet private key
 // Returns: Transaction hash
-func (tron *Tron) signAndBroadcast(tx *api.TransactionExtention, privateKey string) (string, error) {
+func (tron *Tron) signAndSend(tx *api.TransactionExtention, privateKey string) (string, error) {
 	// Convert hex private key string to *ecdsa.PrivateKey
 	ecdsaPk, err := crypto.HexToECDSA(privateKey)
 	if err != nil {

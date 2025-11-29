@@ -108,7 +108,7 @@ func (bsc *Bsc) GetMasterWallet() (map[string]any, error) {
 	}
 	masterAddr := masterData["address"].(string)
 
-	// Get BEP20 tokens balances
+	// Get BEP20 token balances
 	balances := make(map[string]any)
 	for token, contractAddr := range config.ContractsAddresses[bsc.NetworkCode].(map[string]string) {
 		tokenBalance, _ := bsc.getBep20Balance(contractAddr, masterAddr)
@@ -188,7 +188,7 @@ func (bsc *Bsc) GetTransactionCommission(
 
 // GetTransactionStatus Get transaction status by hash
 // hash: Transaction hash
-// Returns: Transaction status
+// Returns: Transaction status (success/pending/failed)
 func (bsc *Bsc) GetTransactionStatus(hash, toAddr string) (string, error) {
 	_, isPending, err := bsc.Client.TransactionByHash(context.Background(), common.HexToHash(hash))
 	if err != nil {
@@ -296,7 +296,7 @@ func (bsc *Bsc) GetInboundTransactions() ([]*InboundTransaction, error) {
 	// Get BNB decimals from config
 	bnbDecimals, err := config.GetChainSetting[int64](
 		config.TokenSettings,
-		fmt.Sprintf("%s.BNB.decimals", bsc.NetworkCode),
+		fmt.Sprintf("%s.%s.decimals", bsc.NetworkCode, "BNB"),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("[%s] Failed to get BNB decimals from config: %w", bsc.NetworkCode, err)
@@ -315,7 +315,7 @@ func (bsc *Bsc) GetInboundTransactions() ([]*InboundTransaction, error) {
 		return nil, fmt.Errorf("[%s] Failed to parse BEP20 ABI from config: %w", bsc.NetworkCode, err)
 	}
 
-	// Cache for contract decimals
+	// Cache for token decimals
 	decimalsCache := make(map[string]int64)
 	var decimalsCacheMu sync.RWMutex
 
@@ -664,6 +664,8 @@ func (bsc *Bsc) calcNativeFee(fromAddr, toAddr string, amount float64) (float64,
 // amount: Amount in float value
 // Returns: Fee in BNB
 func (bsc *Bsc) calcBep20Fee(currency, fromAddr, toAddr string, amount float64) (float64, error) {
+	currency = strings.ToUpper(currency)
+
 	// Get token contract address
 	contractAddr, err := config.GetChainSetting[string](
 		config.ContractsAddresses,
@@ -723,10 +725,10 @@ func (bsc *Bsc) calcBep20Fee(currency, fromAddr, toAddr string, amount float64) 
 
 	// Get total fee in WEI
 	totalFeeWei := new(big.Int).Mul(gasPrice, new(big.Int).SetUint64(gasLimit))
-	// Get WEI decimals from config
+	// Get BNB decimals from config
 	weiDecimals, _ := config.GetChainSetting[int64](
 		config.TokenSettings,
-		fmt.Sprintf("%s.bsc.decimals", bsc.NetworkCode),
+		fmt.Sprintf("%s.%s.decimals", bsc.NetworkCode, "BNB"),
 	)
 
 	// Return converted total fee in BNB
@@ -741,6 +743,21 @@ func (bsc *Bsc) calcBep20Fee(currency, fromAddr, toAddr string, amount float64) 
 // privateKey: Wallet private key
 // Returns: Transaction hash
 func (bsc *Bsc) sendNative(fromAddr, toAddr string, amount float64, privateKey string) (string, error) {
+	// Get BNB balance
+	bnbBalance, err := bsc.getNativeBalance(fromAddr)
+	if err != nil {
+		return "", fmt.Errorf("failed to get BNB balance: %w", err)
+	}
+	// Get tx fee (in BNB)
+	txFee, err := bsc.calcNativeFee(fromAddr, toAddr, amount)
+	if err != nil {
+		return "", fmt.Errorf("failed to get BNB tx fee: %w", err)
+	}
+	// Check BNB balance before sending
+	if bnbBalance < amount+txFee {
+		return "", fmt.Errorf("insufficient balance: have %f %s, need %f + %f %s", bnbBalance, "BNB", amount, txFee, "BNB")
+	}
+
 	// Get BNB decimals from config
 	weiDecimals, _ := config.GetChainSetting[int64](
 		config.TokenSettings,
@@ -785,8 +802,8 @@ func (bsc *Bsc) sendNative(fromAddr, toAddr string, amount float64, privateKey s
 		Data:     nil,
 	})
 
-	// Sign, broadcast transaction to the network and return hash
-	return bsc.signAndBroadcast(tx, privateKey)
+	// Sign and send transaction to the network
+	return bsc.signAndSend(tx, privateKey)
 }
 
 // @private sendBep20 Send BEP20 token transaction
@@ -797,6 +814,8 @@ func (bsc *Bsc) sendNative(fromAddr, toAddr string, amount float64, privateKey s
 // privateKey: Wallet private key
 // Returns: Transaction hash
 func (bsc *Bsc) sendBep20(currency, fromAddr, toAddr string, amount float64, privateKey string) (string, error) {
+	currency = strings.ToUpper(currency)
+
 	// Get token contract address
 	contractAddr, err := config.GetChainSetting[string](
 		config.ContractsAddresses,
@@ -804,6 +823,28 @@ func (bsc *Bsc) sendBep20(currency, fromAddr, toAddr string, amount float64, pri
 	)
 	if err != nil {
 		return "", fmt.Errorf("failed to get contract address: %w", err)
+	}
+
+	// Get BNB and token balances
+	bnbBalance, err := bsc.getNativeBalance(fromAddr)
+	if err != nil {
+		return "", fmt.Errorf("failed to get BNB balance: %w", err)
+	}
+	bep20Balance, err := bsc.getBep20Balance(contractAddr, fromAddr)
+	if err != nil {
+		return "", fmt.Errorf("failed to get %s balance: %w", currency, err)
+	}
+	// Get tx fee (in BNB)
+	txFee, err := bsc.calcBep20Fee(currency, fromAddr, toAddr, amount)
+	if err != nil {
+		return "", fmt.Errorf("failed to get %s tx fee: %w", currency, err)
+	}
+	// Check BNB and currency balances before sending
+	if bnbBalance < txFee {
+		return "", fmt.Errorf("insufficient BNB balance: have %f %s, need %f %s", bnbBalance, "BNB", txFee, "BNB")
+	}
+	if bep20Balance < amount {
+		return "", fmt.Errorf("insufficient currency balance: have %f %s, need %f %s", bep20Balance, currency, amount, currency)
 	}
 
 	// Get token ABI from config
@@ -870,15 +911,15 @@ func (bsc *Bsc) sendBep20(currency, fromAddr, toAddr string, amount float64, pri
 		Data:     data,
 	})
 
-	// Sign, broadcast transaction to the network and return hash
-	return bsc.signAndBroadcast(tx, privateKey)
+	// Sign and send transaction to the network
+	return bsc.signAndSend(tx, privateKey)
 }
 
-// @private signAndBroadcast Sign and broadcast transaction to the network
+// @private signAndSend Sign and send transaction to the network
 // tx: Transaction struct
 // privateKey: Wallet private key
 // Returns: Transaction hash
-func (bsc *Bsc) signAndBroadcast(tx *types.Transaction, privateKey string) (string, error) {
+func (bsc *Bsc) signAndSend(tx *types.Transaction, privateKey string) (string, error) {
 	// Convert hex private key string to *ecdsa.PrivateKey
 	ecdsaPk, err := crypto.HexToECDSA(privateKey)
 	if err != nil {

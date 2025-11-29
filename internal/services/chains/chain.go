@@ -19,26 +19,6 @@ import (
 )
 
 type (
-	// BaseChainService Common fields struct for all chains
-	BaseChainService struct {
-		WalletRepo  *repository.WalletRepository
-		UserRepo    *repository.UserRepository
-		NetworkCode string
-		NativeToken string
-		AmlTokenId  string
-	}
-
-	// ChainService Interface with all chain methods
-	ChainService interface {
-		GetCode() string
-		GetUserWallet(userId int) (string, error)
-		GetMasterWallet() (map[string]any, error)
-		GetTransactionCommission(oType, wType string, wId *string, currency, to string, amount float64, memo string) (map[string]float64, error)
-		GetTransactionStatus(hash, toAddr string) (string, error)
-		SendTransaction(wType string, wId *string, currency, to string, amount float64, memo string) (string, error)
-		GetInboundTransactions() ([]*InboundTransaction, error)
-	}
-
 	// InboundTransaction Inbound transaction struct
 	InboundTransaction struct {
 		UserId   int     `json:"user_id"`
@@ -47,6 +27,25 @@ type (
 		From     string  `json:"from"`
 		To       string  `json:"to"`
 		Amount   float64 `json:"amount"`
+	}
+
+	// BaseChainService Common fields struct for all chains
+	BaseChainService struct {
+		WalletRepo  *repository.WalletRepository
+		UserRepo    *repository.UserRepository
+		NetworkCode string
+		NativeToken string
+	}
+
+	// ChainService Chain interface with all methods
+	ChainService interface {
+		GetCode() string
+		GetUserWallet(userId int) (string, error)
+		GetMasterWallet() (map[string]any, error)
+		GetTransactionCommission(oType, wType string, wId *string, currency, to string, amount float64, memo string) (map[string]float64, error)
+		GetTransactionStatus(hash, toAddr string) (string, error)
+		SendTransaction(wType string, wId *string, currency, to string, amount float64, memo string) (string, error)
+		GetInboundTransactions() ([]*InboundTransaction, error)
 	}
 )
 
