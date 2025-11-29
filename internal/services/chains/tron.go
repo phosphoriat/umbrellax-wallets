@@ -93,8 +93,8 @@ func (tron *Tron) GetUserWallet(userId int) (string, error) {
 		return "", fmt.Errorf("failed to get master data: %w", err)
 	}
 
-	// Derive user address from master mnemonic
-	derivedAddr, err := tron.deriveAddress(masterData["mnemonic"].(string), uint32(userId))
+	// Derive user address from master private key
+	derivedAddr, err := tron.deriveAddress(masterData["privateKey"].(string), uint32(userId))
 	if err != nil {
 		return "", fmt.Errorf("failed to derive address for user %d: %w", userId, err)
 	}
