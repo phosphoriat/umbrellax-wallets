@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"time"
 
 	"wallets/internal/config"
 	"wallets/internal/database/redis"
@@ -20,13 +21,14 @@ type WithdrawRequestTask struct {
 	RedisWithdrawalsKey      string
 }
 
-func NewWithdrawRequestTask() *WithdrawRequestTask {
+func NewWithdrawRequestsTask() *WithdrawRequestTask {
 	cfg, _ := config.Load()
 
 	return &WithdrawRequestTask{
 		BaseTask: BaseTask{
 			maxRetries:  3,
-			name:        "refills",
+			timeout:     10 * time.Second,
+			name:        "withdraw_requests",
 			description: "Process withdraw requests",
 		},
 		bybit:                    bybit.GetHTTPClient(),
@@ -42,6 +44,9 @@ func (t *WithdrawRequestTask) Execute(ctx context.Context) error {
 	key, value, err := redis.GetClient().GetFirstHashElement(ctx, t.RedisBybitReqsKey)
 	if err != nil {
 		log.Printf("Read hash error '%s': %v", t.RedisBybitReqsKey, err)
+		return nil
+	}
+	if key == "" {
 		return nil
 	}
 
@@ -65,7 +70,7 @@ func (t *WithdrawRequestTask) Execute(ctx context.Context) error {
 
 // @private processItem Process hash item
 func (t *WithdrawRequestTask) processItem(ctx context.Context, requestId, itemStr string) error {
-	// Unmarshalling json item string
+	// Unmarshalling JSON item string
 	var item map[string]any
 	err := json.Unmarshal([]byte(itemStr), &item)
 	if err != nil {

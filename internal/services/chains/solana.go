@@ -31,7 +31,9 @@ import (
 
 type Solana struct {
 	BaseChainService
-	Client *rpc.Client
+	Client          *rpc.Client
+	decimalsCache   map[string]int64
+	decimalsCacheMu sync.RWMutex
 }
 
 // Global package vars
@@ -282,15 +284,17 @@ func (sol *Solana) GetInboundTransactions() ([]*InboundTransaction, error) {
 	// Get last block number from Redis (or use current block number, if not exists)
 	lastBlock, err := redis.GetClient().HGet(ctx, "last_blocks", sol.NetworkCode)
 	var lastBlockNumber uint64
-	if err != nil {
-		lastBlockNumber = currentBlockNum
+	if err != nil || lastBlock == "" {
+		lastBlockNumber = currentBlockNum - 10
+		log.Printf("[%s] First run, starting from block %d (current: %d)",
+			sol.NetworkCode, lastBlockNumber, currentBlockNum)
 	} else {
 		lastBlockNumber, _ = strconv.ParseUint(lastBlock, 10, 64)
 	}
 
 	// Check if current block not equal or less, than last block
 	if currentBlockNum <= lastBlockNumber {
-		log.Printf("[%s] No new slots to process", sol.NetworkCode)
+		log.Printf("[%s] No new blocks to process", sol.NetworkCode)
 		return []*InboundTransaction{}, nil
 	}
 
@@ -301,17 +305,13 @@ func (sol *Solana) GetInboundTransactions() ([]*InboundTransaction, error) {
 	}
 
 	// Get SOL decimals from config
-	solDecimals, err := config.GetChainSetting[int64](
+	solDecimals, err := config.GetChainSetting[int](
 		config.TokenSettings,
 		fmt.Sprintf("%s.%s.decimals", sol.NetworkCode, "SOL"),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("[%s] Failed to get SOL decimals from config: %w", sol.NetworkCode, err)
 	}
-
-	// Cache for token decimals
-	decimalsCache := make(map[string]int64)
-	var decimalsCacheMu sync.RWMutex
 
 	// Wait group to wait for all address goroutines to complete
 	var wg sync.WaitGroup
@@ -433,7 +433,7 @@ func (sol *Solana) GetInboundTransactions() ([]*InboundTransaction, error) {
 									uint64(instruction.Data[8])<<56
 
 								// Get converted amount (in SOL)
-								amount := utils.RemoveDecimals(big.NewInt(int64(lamports)), solDecimals)
+								amount := utils.RemoveDecimals(big.NewInt(int64(lamports)), int64(solDecimals))
 
 								localTxList = append(localTxList, &InboundTransaction{
 									UserId:   int(userId),
@@ -509,9 +509,9 @@ func (sol *Solana) GetInboundTransactions() ([]*InboundTransaction, error) {
 								}
 
 								// Get contract decimals from cache or fetch from contract
-								decimalsCacheMu.RLock()
-								cached, exists := decimalsCache[contractAddr]
-								decimalsCacheMu.RUnlock()
+								sol.decimalsCacheMu.RLock()
+								cached, exists := sol.decimalsCache[contractAddr]
+								sol.decimalsCacheMu.RUnlock()
 
 								var decimalsValue int64
 								if exists {
@@ -540,9 +540,9 @@ func (sol *Solana) GetInboundTransactions() ([]*InboundTransaction, error) {
 									decimalsValue = int64(mintData.Decimals)
 
 									// Save decimals to cache
-									decimalsCacheMu.Lock()
-									decimalsCache[contractAddr] = decimalsValue
-									decimalsCacheMu.Unlock()
+									sol.decimalsCacheMu.Lock()
+									sol.decimalsCache[contractAddr] = decimalsValue
+									sol.decimalsCacheMu.Unlock()
 								}
 
 								// Get converted amount
@@ -691,12 +691,12 @@ func (sol *Solana) getNativeBalance(addr string) (float64, error) {
 	}
 
 	// Get SOL decimals from config
-	solDecimals, _ := config.GetChainSetting[int64](
+	solDecimals, _ := config.GetChainSetting[int](
 		config.TokenSettings,
 		fmt.Sprintf("%s.%s.decimals", sol.NetworkCode, "SOL"),
 	)
 	// Get converted balance (in SOL)
-	balance := utils.RemoveDecimals(big.NewInt(int64(result.Value)), solDecimals)
+	balance := utils.RemoveDecimals(big.NewInt(int64(result.Value)), int64(solDecimals))
 
 	return balance, nil
 }
@@ -793,7 +793,7 @@ func (sol *Solana) calcNativeFee(fromAddr, toAddr string, amount float64) (float
 	}
 
 	// Get SOL decimals from config
-	solDecimals, err := config.GetChainSetting[int64](
+	solDecimals, err := config.GetChainSetting[int](
 		config.TokenSettings,
 		fmt.Sprintf("%s.%s.decimals", sol.NetworkCode, "SOL"),
 	)
@@ -802,7 +802,7 @@ func (sol *Solana) calcNativeFee(fromAddr, toAddr string, amount float64) (float
 	}
 
 	// Get converted amount (in lamports)
-	lamports := utils.ApplyDecimals(amount, solDecimals)
+	lamports := utils.ApplyDecimals(amount, int64(solDecimals))
 
 	// Get latest blockhash
 	recentBlockhash, err := sol.Client.GetLatestBlockhash(ctx, rpc.CommitmentFinalized)
@@ -839,7 +839,7 @@ func (sol *Solana) calcNativeFee(fromAddr, toAddr string, amount float64) (float
 	}
 
 	// Get converted amount (in SOL)
-	convertedFee := utils.RemoveDecimals(big.NewInt(int64(*feeResult.Value)), solDecimals)
+	convertedFee := utils.RemoveDecimals(big.NewInt(int64(*feeResult.Value)), int64(solDecimals))
 
 	return convertedFee, nil
 }
@@ -880,7 +880,7 @@ func (sol *Solana) calcSplFee(currency, fromAddr, toAddr string, amount float64)
 	}
 
 	// Get SOL decimals from config
-	solDecimals, err := config.GetChainSetting[int64](
+	solDecimals, err := config.GetChainSetting[int](
 		config.TokenSettings,
 		fmt.Sprintf("%s.%s.decimals", sol.NetworkCode, "SOL"),
 	)
@@ -969,13 +969,13 @@ func (sol *Solana) calcSplFee(currency, fromAddr, toAddr string, amount float64)
 	}
 
 	// Get converted amount (in SOL)
-	convertedFee := utils.RemoveDecimals(big.NewInt(int64(*feeResult.Value)), solDecimals)
+	convertedFee := utils.RemoveDecimals(big.NewInt(int64(*feeResult.Value)), int64(solDecimals))
 
 	// Add rent exemption if creating new account, if needed
 	if len(instructions) > 1 {
 		rentExemption, err := sol.Client.GetMinimumBalanceForRentExemption(ctx, 165, rpc.CommitmentFinalized)
 		if err == nil {
-			rentFee := utils.RemoveDecimals(big.NewInt(int64(rentExemption)), solDecimals)
+			rentFee := utils.RemoveDecimals(big.NewInt(int64(rentExemption)), int64(solDecimals))
 			convertedFee += rentFee
 		}
 	}
@@ -1026,7 +1026,7 @@ func (sol *Solana) sendNative(fromAddr, toAddr string, amount float64, privateKe
 	}
 
 	// Get SOL decimals from config
-	solDecimals, err := config.GetChainSetting[int64](
+	solDecimals, err := config.GetChainSetting[int](
 		config.TokenSettings,
 		fmt.Sprintf("%s.%s.decimals", sol.NetworkCode, "SOL"),
 	)
@@ -1035,7 +1035,7 @@ func (sol *Solana) sendNative(fromAddr, toAddr string, amount float64, privateKe
 	}
 
 	// Get converted amount (in lamports)
-	lamports := utils.ApplyDecimals(amount, solDecimals)
+	lamports := utils.ApplyDecimals(amount, int64(solDecimals))
 
 	// Get latest blockhash
 	recentBlockhash, err := sol.Client.GetLatestBlockhash(ctx, rpc.CommitmentFinalized)

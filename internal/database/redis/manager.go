@@ -123,6 +123,26 @@ func (c *Client) Get(ctx context.Context, key string) (string, error) {
 	return client.Get(ctx, key).Result()
 }
 
+// Del Delete key from Redis
+func (c *Client) Del(ctx context.Context, keys ...string) error {
+	client, err := c.getClient()
+	if err != nil {
+		return err
+	}
+
+	return client.Del(ctx, keys...).Err()
+}
+
+// Exists Check if key exists
+func (c *Client) Exists(ctx context.Context, keys ...string) (int64, error) {
+	client, err := c.getClient()
+	if err != nil {
+		return 0, err
+	}
+
+	return client.Exists(ctx, keys...).Result()
+}
+
 // GetWithExpiration Get key value with TTL
 func (c *Client) GetWithExpiration(ctx context.Context, key string) (string, time.Duration, error) {
 	client, err := c.getClient()
@@ -152,24 +172,14 @@ func (c *Client) GetWithExpiration(ctx context.Context, key string) (string, tim
 	return value, ttl, nil
 }
 
-// Del Delete key from Redis
-func (c *Client) Del(ctx context.Context, keys ...string) error {
-	client, err := c.getClient()
-	if err != nil {
-		return err
-	}
-
-	return client.Del(ctx, keys...).Err()
-}
-
-// Exists Check if key exists
-func (c *Client) Exists(ctx context.Context, keys ...string) (int64, error) {
+// TTL Get key expire time (TTL)
+func (c *Client) TTL(ctx context.Context, key string) (time.Duration, error) {
 	client, err := c.getClient()
 	if err != nil {
 		return 0, err
 	}
 
-	return client.Exists(ctx, keys...).Result()
+	return client.TTL(ctx, key).Result()
 }
 
 // Expire Set key expire time (TTL)
@@ -180,16 +190,6 @@ func (c *Client) Expire(ctx context.Context, key string, expiration time.Duratio
 	}
 
 	return client.Expire(ctx, key, expiration).Err()
-}
-
-// TTL Get key expire time (TTL)
-func (c *Client) TTL(ctx context.Context, key string) (time.Duration, error) {
-	client, err := c.getClient()
-	if err != nil {
-		return 0, err
-	}
-
-	return client.TTL(ctx, key).Result()
 }
 
 // HSet Set hash field value
@@ -285,7 +285,7 @@ func (c *Client) GetFirstHashElement(ctx context.Context, key string) (string, s
 	}
 
 	if len(keys) < 2 {
-		return "", "", fmt.Errorf("hash '%s' is empty or invalid", key)
+		return "", "", nil
 	}
 
 	return keys[0], keys[1], nil

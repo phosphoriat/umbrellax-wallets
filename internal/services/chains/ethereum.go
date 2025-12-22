@@ -32,7 +32,9 @@ import (
 // Ethereum RPC connection struct
 type Ethereum struct {
 	BaseChainService
-	Client *ethclient.Client
+	Client          *ethclient.Client
+	decimalsCache   map[string]int64
+	decimalsCacheMu sync.RWMutex
 }
 
 // Global package vars
@@ -55,7 +57,7 @@ func newEthereum() *Ethereum {
 	cfg, _ := config.Load()
 
 	// Create new RPC client
-	ethClient, err := ethclient.Dial(cfg.EthRpcUrl)
+	ethClient, err := ethclient.Dial(cfg.EthRpcUrl + "/" + cfg.QuickNodeApiKey)
 	if err != nil {
 		log.Printf("[Ethereum] Failed to connect to RPC API: %v", err)
 	}
@@ -100,7 +102,7 @@ func (eth *Ethereum) GetUserWallet(userId int) (string, error) {
 }
 
 // GetMasterWallet Get master wallet info (address and token balances)
-// Returns: Map of mster wallet info (address and balances of all available tokens)
+// Returns: Map of master wallet info (address and balances of all available tokens)
 func (eth *Ethereum) GetMasterWallet() (map[string]any, error) {
 	// Get master wallet info from Vault
 	masterData, err := vault.GetClient().GetSecret("/master/" + eth.NetworkCode)
@@ -269,8 +271,10 @@ func (eth *Ethereum) GetInboundTransactions() ([]*InboundTransaction, error) {
 	// Get last block number from Redis (or use current block number, if not exists)
 	lastBlock, err := redis.GetClient().HGet(ctx, "last_blocks", eth.NetworkCode)
 	var lastBlockNumber uint64
-	if err != nil {
-		lastBlockNumber = currentBlockNum
+	if err != nil || lastBlock == "" {
+		lastBlockNumber = currentBlockNum - 10
+		log.Printf("[%s] First run, starting from block %d (current: %d)",
+			eth.NetworkCode, lastBlockNumber, currentBlockNum)
 	} else {
 		parsed, _ := strconv.ParseUint(lastBlock, 10, 64)
 		lastBlockNumber = parsed
@@ -295,7 +299,7 @@ func (eth *Ethereum) GetInboundTransactions() ([]*InboundTransaction, error) {
 	}
 
 	// Get ETH decimals from config
-	ethDecimals, err := config.GetChainSetting[int64](
+	ethDecimals, err := config.GetChainSetting[int](
 		config.TokenSettings,
 		fmt.Sprintf("%s.%s.decimals", eth.NetworkCode, "ETH"),
 	)
@@ -315,10 +319,6 @@ func (eth *Ethereum) GetInboundTransactions() ([]*InboundTransaction, error) {
 	if err != nil {
 		return nil, fmt.Errorf("[%s] Failed to parse ERC20 ABI from config: %w", eth.NetworkCode, err)
 	}
-
-	// Cache for token decimals
-	decimalsCache := make(map[string]int64)
-	var decimalsCacheMu sync.RWMutex
 
 	// Wait group to wait for all tx blocks goroutines to complete
 	var wg sync.WaitGroup
@@ -383,7 +383,7 @@ func (eth *Ethereum) GetInboundTransactions() ([]*InboundTransaction, error) {
 						}
 
 						// Get converted amount (in ETH)
-						amount := utils.RemoveDecimals(tx.Value(), ethDecimals)
+						amount := utils.RemoveDecimals(tx.Value(), int64(ethDecimals))
 
 						localTxList = append(localTxList, &InboundTransaction{
 							UserId:   int(userId),
@@ -418,9 +418,9 @@ func (eth *Ethereum) GetInboundTransactions() ([]*InboundTransaction, error) {
 						// Check if address exists in network addresses list
 						if userId, ok := addressList[toAddr]; ok {
 							// Get contract decimals from cache or fetch from contract
-							decimalsCacheMu.RLock()
-							cached, exists := decimalsCache[contractAddr]
-							decimalsCacheMu.RUnlock()
+							eth.decimalsCacheMu.RLock()
+							cached, exists := eth.decimalsCache[contractAddr]
+							eth.decimalsCacheMu.RUnlock()
 
 							var decimalsValue int64
 							if exists {
@@ -441,9 +441,9 @@ func (eth *Ethereum) GetInboundTransactions() ([]*InboundTransaction, error) {
 								decimalsValue = *abi.ConvertType(out[0], new(int64)).(*int64)
 
 								// Save decimals to cache
-								decimalsCacheMu.Lock()
-								decimalsCache[contractAddr] = decimalsValue
-								decimalsCacheMu.Unlock()
+								eth.decimalsCacheMu.Lock()
+								eth.decimalsCache[contractAddr] = decimalsValue
+								eth.decimalsCacheMu.Unlock()
 							}
 
 							// Get sender address
@@ -572,12 +572,12 @@ func (eth *Ethereum) getNativeBalance(addr string) (float64, error) {
 	}
 
 	// Get ETH decimals from config
-	ethDecimals, _ := config.GetChainSetting[int64](
+	ethDecimals, _ := config.GetChainSetting[int](
 		config.TokenSettings,
 		fmt.Sprintf("%s.%s.decimals", eth.NetworkCode, "ETH"),
 	)
 	// Return converted balance (in ETH)
-	return utils.RemoveDecimals(rawBalance, ethDecimals), nil
+	return utils.RemoveDecimals(rawBalance, int64(ethDecimals)), nil
 }
 
 // @private getErc20Balance Get wallet ERC20 token balance
@@ -628,12 +628,12 @@ func (eth *Ethereum) getErc20Balance(contractAddr, addr string) (float64, error)
 // Returns: Fee in ETH
 func (eth *Ethereum) calcNativeFee(fromAddr, toAddr string, amount float64) (float64, error) {
 	// Get ETH decimals from config
-	weiDecimals, _ := config.GetChainSetting[int64](
+	weiDecimals, _ := config.GetChainSetting[int](
 		config.TokenSettings,
 		fmt.Sprintf("%s.%s.decimals", eth.NetworkCode, "ETH"),
 	)
 	// Convert amount to WEI
-	amountWei := utils.ApplyDecimals(amount, weiDecimals)
+	amountWei := utils.ApplyDecimals(amount, int64(weiDecimals))
 
 	// Get converted from and to addresses
 	from := common.HexToAddress(fromAddr)
@@ -658,7 +658,7 @@ func (eth *Ethereum) calcNativeFee(fromAddr, toAddr string, amount float64) (flo
 	// Get total fee in WEI
 	totalFeeWei := new(big.Int).Mul(gasPrice, new(big.Int).SetUint64(gasLimit))
 	// Return convert total fee in ETH
-	return utils.RemoveDecimals(totalFeeWei, weiDecimals), nil
+	return utils.RemoveDecimals(totalFeeWei, int64(weiDecimals)), nil
 }
 
 // @private calcErc20Fee Calc fee for ERC20 token transaction
@@ -730,12 +730,12 @@ func (eth *Ethereum) calcErc20Fee(currency, fromAddr, toAddr string, amount floa
 	// Get total fee in WEI
 	totalFeeWei := new(big.Int).Mul(gasPrice, new(big.Int).SetUint64(gasLimit))
 	// Get ETH decimals from config
-	weiDecimals, _ := config.GetChainSetting[int64](
+	weiDecimals, _ := config.GetChainSetting[int](
 		config.TokenSettings,
 		fmt.Sprintf("%s.%s.decimals", eth.NetworkCode, "ETH"),
 	)
 	// Return converted total fee in ETH
-	return utils.RemoveDecimals(totalFeeWei, weiDecimals), nil
+	return utils.RemoveDecimals(totalFeeWei, int64(weiDecimals)), nil
 }
 
 /* SendTransaction private methods group */
@@ -762,12 +762,12 @@ func (eth *Ethereum) sendNative(fromAddr, toAddr string, amount float64, private
 	}
 
 	// Get ETH decimals from config
-	weiDecimals, _ := config.GetChainSetting[int64](
+	weiDecimals, _ := config.GetChainSetting[int](
 		config.TokenSettings,
 		fmt.Sprintf("%s.%s.decimals", eth.NetworkCode, "ETH"),
 	)
 	// Convert amount to WEI
-	amountWei := utils.ApplyDecimals(amount, weiDecimals)
+	amountWei := utils.ApplyDecimals(amount, int64(weiDecimals))
 
 	// Get converted from and to address
 	from := common.HexToAddress(fromAddr)

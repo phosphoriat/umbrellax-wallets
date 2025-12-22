@@ -51,8 +51,8 @@ func Close() error {
 // @private newClickHouseClient Create new ClickHouse Client instance (private constructor)
 func newClickHouseClient(cfg *config.Config) (*Client, error) {
 	// Form DSN ClickHouse connection configuration string
-	dsn := fmt.Sprintf("tcp://%s:%s?database=%s&username=%s&password=%s&read_timeout=10&write_timeout=20",
-		cfg.DbHost, cfg.DbPort, cfg.DbName, cfg.DbUser, cfg.DbPassword)
+	dsn := fmt.Sprintf("tcp://%s:%s?database=%s&username=%s&password=%s&read_timeout=10s",
+		cfg.ClickHouseHost, cfg.ClickHousePort, cfg.ClickHouseName, cfg.ClickHouseUser, cfg.ClickHousePassword)
 
 	// Open ClickHouse connection
 	db, err := gorm.Open(clickhouse.Open(dsn), &gorm.Config{})

@@ -41,6 +41,8 @@ type (
 		BaseChainService
 		Client        ton.APIClientWrapped
 		WalletVersion wallet.Version
+		jettonCache   map[string]*JettonInfo
+		jettonCacheMu sync.RWMutex
 	}
 
 	JettonInfo struct {
@@ -66,8 +68,20 @@ func GetTon() *Ton {
 
 // @private newTon Create new instance of Ton (private constructor)
 func newTon() *Ton {
-	// Create new Ton ADNL API client
-	apiClient := ton.NewAPIClient(liteclient.NewConnectionPool()).WithRetry()
+	// Load config
+	cfg, _ := config.Load()
+
+	// Create new connection pool
+	client := liteclient.NewConnectionPool()
+
+	// Add connections to pool
+	err := client.AddConnectionsFromConfigUrl(context.Background(), cfg.TonConfigUrl)
+	if err != nil {
+		log.Fatalf("[Ton] Failed to connect to : %v", err)
+	}
+
+	// Create new Ton API client
+	apiClient := ton.NewAPIClient(client).WithRetry(3)
 
 	networkCode := "ton"
 	// Get network settings
@@ -103,7 +117,7 @@ func (ton *Ton) GetUserWallet(userId int) (string, error) {
 }
 
 // GetMasterWallet Get master wallet info (address and token balances)
-// Returns: Map of mster wallet info (address and balances of all available tokens)
+// Returns: Map of master wallet info (address and balances of all available tokens)
 func (ton *Ton) GetMasterWallet() (map[string]any, error) {
 	// Get master wallet info from Vault
 	masterData, err := vault.GetClient().GetSecret("/master/" + ton.NetworkCode)
@@ -335,11 +349,12 @@ func (ton *Ton) SendTransaction(wType string, wId *string, currency, toAddr stri
 func (ton *Ton) GetInboundTransactions() ([]*InboundTransaction, error) {
 	ctx := context.Background()
 
-	// Get last logical time from Redis
+	// Get last logical time (LT) from Redis
 	lastLTStr, err := redis.GetClient().HGet(ctx, "last_blocks", ton.NetworkCode)
 	var lastLT uint64
-	if err != nil {
+	if err != nil || lastLTStr == "" {
 		lastLT = 0
+		log.Printf("[%s] First run, starting from LT 0", ton.NetworkCode)
 	} else {
 		lastLT, _ = strconv.ParseUint(lastLTStr, 10, 64)
 	}
@@ -354,7 +369,7 @@ func (ton *Ton) GetInboundTransactions() ([]*InboundTransaction, error) {
 	masterAddr := address.MustParseAddr(masterAddrStr)
 
 	// Get TON decimals from config
-	tonDecimals, err := config.GetChainSetting[int64](
+	tonDecimals, err := config.GetChainSetting[int](
 		config.TokenSettings,
 		fmt.Sprintf("%s.%s.decimals", ton.NetworkCode, "TON"),
 	)
@@ -362,15 +377,20 @@ func (ton *Ton) GetInboundTransactions() ([]*InboundTransaction, error) {
 		return nil, fmt.Errorf("[%s] Failed to get %s decimals from config: %w", ton.NetworkCode, "TON", err)
 	}
 
-	// Cache for jetton info
-	jettonCache := make(map[string]*JettonInfo)
-	var jettonCacheMu sync.RWMutex
-
 	// Get transactions list (up to 100 transactions)
-	txList, err := ton.Client.ListTransactions(ctx, masterAddr, 100, lastLT, nil)
+	queryLT := lastLT
+	if lastLT > 0 {
+		queryLT++
+	}
+	txList, err := ton.Client.ListTransactions(ctx, masterAddr, 100, queryLT, nil)
 	if err != nil {
 		return nil, fmt.Errorf("[%s] Failed to get transactions for master address: %w",
 			ton.NetworkCode, err)
+	}
+	// Check if tx list is not empty
+	if len(txList) == 0 {
+		log.Printf("[%s] No new txs to process", ton.NetworkCode)
+		return []*InboundTransaction{}, nil
 	}
 
 	log.Printf("[%s] Processing %d transactions for master address from LT %d",
@@ -383,7 +403,7 @@ func (ton *Ton) GetInboundTransactions() ([]*InboundTransaction, error) {
 
 	// Process transactions
 	for _, tx := range txList {
-		// Update max LT
+		// Update maxLT for every transaction (processed or skipped)
 		if tx.LT > maxLT {
 			maxLT = tx.LT
 		}
@@ -433,7 +453,7 @@ func (ton *Ton) GetInboundTransactions() ([]*InboundTransaction, error) {
 		// Check if it's a native TON transfer
 		if intMsg.Amount.Nano().Uint64() > 0 {
 			// Get converted amount (in TON)
-			amount := utils.RemoveDecimals(intMsg.Amount.Nano(), tonDecimals)
+			amount := utils.RemoveDecimals(intMsg.Amount.Nano(), int64(tonDecimals))
 
 			inboundTxList = append(inboundTxList, &InboundTransaction{
 				UserId:   int(userId),
@@ -491,9 +511,9 @@ func (ton *Ton) GetInboundTransactions() ([]*InboundTransaction, error) {
 			jettonWalletAddr := intMsg.SrcAddr.String()
 
 			// Get jetton info from cache or fetch from contract
-			jettonCacheMu.RLock()
-			cached, exists := jettonCache[jettonWalletAddr]
-			jettonCacheMu.RUnlock()
+			ton.jettonCacheMu.RLock()
+			cached, exists := ton.jettonCache[jettonWalletAddr]
+			ton.jettonCacheMu.RUnlock()
 
 			var jettonInfo *JettonInfo
 			if exists {
@@ -532,7 +552,7 @@ func (ton *Ton) GetInboundTransactions() ([]*InboundTransaction, error) {
 				}
 
 				// Get decimals from config
-				decimals, err := config.GetChainSetting[int64](
+				decimals, err := config.GetChainSetting[int](
 					config.TokenSettings,
 					fmt.Sprintf("%s.%s.decimals", ton.NetworkCode, token),
 				)
@@ -543,14 +563,14 @@ func (ton *Ton) GetInboundTransactions() ([]*InboundTransaction, error) {
 
 				jettonInfo = &JettonInfo{
 					masterAddr: jettonMasterAddr,
-					decimals:   decimals,
+					decimals:   int64(decimals),
 					token:      token,
 				}
 
 				// Save jetton info to cache
-				jettonCacheMu.Lock()
-				jettonCache[jettonWalletAddr] = jettonInfo
-				jettonCacheMu.Unlock()
+				ton.jettonCacheMu.Lock()
+				ton.jettonCache[jettonWalletAddr] = jettonInfo
+				ton.jettonCacheMu.Unlock()
 			}
 
 			// Get converted amount (with removed decimals)
@@ -869,10 +889,11 @@ func (ton *Ton) sendCalcFeeRequest(fromAddr *address.Address, extMessage *tlb.Ex
 	}
 
 	// Create HTTP request with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", cfg.TonRpcUrl+"/estimateFee", bytes.NewReader(reqBody))
+	url := cfg.TonHttpUrl + "/" + cfg.QuickNodeApiKey + "/estimateFee"
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(reqBody))
 	if err != nil {
 		return 0, fmt.Errorf("failed to build http request: %w", err)
 	}
@@ -880,7 +901,6 @@ func (ton *Ton) sendCalcFeeRequest(fromAddr *address.Address, extMessage *tlb.Ex
 	// Set headers
 	httpReq.Header.Set("Accept", "application/json")
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("X-Api-Key", cfg.TatumApiKey)
 
 	// Send HTTP request to RPC provider
 	response, err := http.DefaultClient.Do(httpReq)

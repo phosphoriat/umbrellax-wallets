@@ -1,6 +1,8 @@
 module wallets
 
-go 1.25.4
+go 1.25.5
+
+exclude google.golang.org/genproto v0.0.0-20200331122359-1ee6d9798940
 
 require (
 	github.com/avast/retry-go/v5 v5.0.0
@@ -17,12 +19,13 @@ require (
 	github.com/go-co-op/gocron/v2 v2.19.0
 	github.com/go-playground/validator/v10 v10.30.0
 	github.com/gofiber/fiber/v2 v2.52.10
-	github.com/gogo/protobuf v1.3.2
 	github.com/google/uuid v1.6.0
 	github.com/hashicorp/vault/api v1.22.0
 	github.com/joho/godotenv v1.5.1
 	github.com/redis/go-redis/v9 v9.17.2
 	github.com/xssnick/tonutils-go v1.15.5
+	google.golang.org/grpc v1.77.0
+	google.golang.org/protobuf v1.36.11
 	gorm.io/driver/clickhouse v0.7.0
 	gorm.io/driver/postgres v1.6.0
 	gorm.io/gorm v1.31.1
@@ -33,7 +36,7 @@ require (
 	github.com/ClickHouse/ch-go v0.69.0 // indirect
 	github.com/ClickHouse/clickhouse-go/v2 v2.42.0 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
-	github.com/ProjectZKM/Ziren/crates/go-runtime/zkvm_runtime v0.0.0-20251221085550-b8e13ca38217 // indirect
+	github.com/ProjectZKM/Ziren/crates/go-runtime/zkvm_runtime v0.0.0-20251222010151-8a13a32a690c // indirect
 	github.com/andybalholm/brotli v1.2.0 // indirect
 	github.com/benbjohnson/clock v1.3.5 // indirect
 	github.com/bitly/go-simplejson v0.5.1 // indirect
@@ -134,8 +137,6 @@ require (
 	golang.org/x/term v0.38.0 // indirect
 	golang.org/x/text v0.32.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
-	google.golang.org/genproto/googleapis/api v0.0.0-20251213004720-97cd9d5aeac2 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20251213004720-97cd9d5aeac2 // indirect
-	google.golang.org/grpc v1.77.0 // indirect
-	google.golang.org/protobuf v1.36.11 // indirect
+	google.golang.org/genproto/googleapis/api v0.0.0-20251222181119-0a764e51fe1b // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20251222181119-0a764e51fe1b // indirect
 )

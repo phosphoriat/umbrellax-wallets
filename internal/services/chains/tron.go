@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"fmt"
 	"log"
@@ -28,13 +29,32 @@ import (
 	"github.com/fbsobreira/gotron-sdk/pkg/common/decimals"
 	"github.com/fbsobreira/gotron-sdk/pkg/proto/api"
 	"github.com/fbsobreira/gotron-sdk/pkg/proto/core"
-	"github.com/gogo/protobuf/proto"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/protobuf/proto"
 )
 
 // Tron RPC connection struct
 type Tron struct {
 	BaseChainService
-	Client *client.GrpcClient
+	Client          *client.GrpcClient
+	decimalsCache   map[string]int64
+	decimalsCacheMu sync.RWMutex
+}
+
+// Struct for QuickNode tron auth
+type tronAuth struct {
+	token string
+}
+
+func (ta *tronAuth) GetRequestMetadata(ctx context.Context, uri ...string) (map[string]string, error) {
+	return map[string]string{
+		"x-token": ta.token,
+	}, nil
+}
+
+func (ta *tronAuth) RequireTransportSecurity() bool {
+	return false
 }
 
 // Global package vars
@@ -57,10 +77,13 @@ func newTron() *Tron {
 	cfg, _ := config.Load()
 
 	// Create new RPC client
+	opts := []grpc.DialOption{
+		grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{})),
+		grpc.WithPerRPCCredentials(&tronAuth{cfg.QuickNodeApiKey}),
+	}
 	rpcClient := client.NewGrpcClient(cfg.TronRpcUrl)
-	err := rpcClient.Start(client.GRPCInsecure())
-	if err != nil {
-		log.Printf("[Tron] Failed to connect to RPC API: %v", err)
+	if err := rpcClient.Start(opts...); err != nil {
+		log.Fatalf("[Tron] Failed to connect to RPC API: %v", err)
 	}
 
 	networkCode := "tron"
@@ -103,7 +126,7 @@ func (tron *Tron) GetUserWallet(userId int) (string, error) {
 }
 
 // GetMasterWallet Get master wallet info (address and token balances)
-// Returns: Map of mster wallet info (address and balances of all available tokens)
+// Returns: Map of master wallet info (address and balances of all available tokens)
 func (tron *Tron) GetMasterWallet() (map[string]any, error) {
 	// Get master wallet info from Vault
 	masterData, err := vault.GetClient().GetSecret("/master/" + tron.NetworkCode)
@@ -269,8 +292,10 @@ func (tron *Tron) GetInboundTransactions() ([]*InboundTransaction, error) {
 	// Get last block number from Redis (or use current block number, if not exists)
 	lastBlock, err := redis.GetClient().HGet(ctx, "last_blocks", tron.NetworkCode)
 	var lastBlockNumber int64
-	if err != nil {
-		lastBlockNumber = currentBlockNum
+	if err != nil || lastBlock == "" {
+		lastBlockNumber = currentBlockNum - 1
+		log.Printf("[%s] First run, starting from block %d (current: %d)",
+			tron.NetworkCode, lastBlockNumber, currentBlockNum)
 	} else {
 		lastBlockNumber, _ = strconv.ParseInt(lastBlock, 10, 64)
 	}
@@ -288,17 +313,13 @@ func (tron *Tron) GetInboundTransactions() ([]*InboundTransaction, error) {
 	}
 
 	// Get TRX decimals from config
-	trxDecimals, err := config.GetChainSetting[int64](
+	trxDecimals, err := config.GetChainSetting[int](
 		config.TokenSettings,
 		fmt.Sprintf("%s.%s.decimals", tron.NetworkCode, "TRX"),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("[%s] Failed to get TRX decimals from config: %w", tron.NetworkCode, err)
 	}
-
-	// Cache for token decimals
-	decimalsCache := make(map[string]int64)
-	var decimalsCacheMu sync.RWMutex
 
 	// Wait group to wait for all tx blocks goroutines to complete
 	var wg sync.WaitGroup
@@ -339,15 +360,14 @@ func (tron *Tron) GetInboundTransactions() ([]*InboundTransaction, error) {
 
 				// Get tx id
 				txId := fmt.Sprintf("%x", tx.GetTxid())
-				txInfo, err := tron.Client.GetTransactionInfoByID(txId)
-				if err != nil {
-					log.Printf("[%s] Failed to get transaction info: %v", tron.NetworkCode, err)
+				// Check if status SUCCESS
+				if tx.Result == nil {
+					log.Printf("[%s] Transaction '%s' has nil result", tron.NetworkCode, txId)
 					continue
 				}
-
-				// Check status (SUCCESS = 1)
-				if txInfo.Receipt.Result != core.Transaction_Result_SUCCESS {
-					log.Printf("[%s] Transaction '%s' failed with status %v", tron.NetworkCode, txId, txInfo.Receipt.Result)
+				if tx.Result.Code != api.Return_SUCCESS {
+					log.Printf("[%s] Transaction '%s' failed: status=%s, code=%s",
+						tron.NetworkCode, txId, tx.Result.Code.String(), tx.Result.Code)
 					continue
 				}
 
@@ -377,7 +397,7 @@ func (tron *Tron) GetInboundTransactions() ([]*InboundTransaction, error) {
 					// Check if address exists in network addresses list
 					if userId, ok := addressList[toAddr]; ok {
 						// Get converted amount (in TRX)
-						amount, _ := decimals.RemoveDecimals(big.NewInt(transferContract.Amount), trxDecimals).Float64()
+						amount, _ := decimals.RemoveDecimals(big.NewInt(transferContract.Amount), int64(trxDecimals)).Float64()
 
 						localTxList = append(localTxList, &InboundTransaction{
 							UserId:   int(userId),
@@ -429,9 +449,9 @@ func (tron *Tron) GetInboundTransactions() ([]*InboundTransaction, error) {
 							// Check if address exists in network addresses list
 							if userId, ok := addressList[toAddr]; ok {
 								// Get contract decimals from cache or fetch from contract
-								decimalsCacheMu.RLock()
-								cached, exists := decimalsCache[contractAddr]
-								decimalsCacheMu.RUnlock()
+								tron.decimalsCacheMu.RLock()
+								cached, exists := tron.decimalsCache[contractAddr]
+								tron.decimalsCacheMu.RUnlock()
 
 								var decimalsValue int64
 								if exists {
@@ -448,9 +468,9 @@ func (tron *Tron) GetInboundTransactions() ([]*InboundTransaction, error) {
 									decimalsValue = decimalsResult.Int64()
 
 									// Save decimals to cache
-									decimalsCacheMu.Lock()
-									decimalsCache[contractAddr] = decimalsValue
-									decimalsCacheMu.Unlock()
+									tron.decimalsCacheMu.Lock()
+									tron.decimalsCache[contractAddr] = decimalsValue
+									tron.decimalsCacheMu.Unlock()
 								}
 
 								// Extract amount (bytes 36-68)
@@ -604,12 +624,12 @@ func (tron *Tron) getNativeBalance(addr string) (float64, error) {
 	rawBalance := big.NewInt(account.Balance)
 
 	// Get TRX decimals
-	trxDecimals, _ := config.GetChainSetting[int64](
+	trxDecimals, _ := config.GetChainSetting[int](
 		config.TokenSettings,
 		fmt.Sprintf("%s.%s.decimals", tron.NetworkCode, "TRX"),
 	)
 	// Get converted balance (in TRX)
-	trxBalance, _ := decimals.RemoveDecimals(rawBalance, trxDecimals).Float64()
+	trxBalance, _ := decimals.RemoveDecimals(rawBalance, int64(trxDecimals)).Float64()
 
 	return trxBalance, nil
 }
@@ -650,19 +670,19 @@ func (tron *Tron) calcNativeFee(fromAddr, toAddr string, amount float64) (float6
 	}
 
 	// Get TRX decimals
-	trxDecimals, _ := config.GetChainSetting[int64](
+	trxDecimals, _ := config.GetChainSetting[int](
 		config.TokenSettings,
 		fmt.Sprintf("%s.%s.decimals", tron.NetworkCode, "TRX"),
 	)
 	// Convert amount to SUN
-	amountSun, _ := decimals.ApplyDecimals(big.NewFloat(amount), trxDecimals)
+	amountSun, _ := decimals.ApplyDecimals(big.NewFloat(amount), int64(trxDecimals))
 
 	// Check, if to account activated
 	activationFee := big.NewInt(0)
 	toAccount, err := tron.Client.GetAccount(toAddr)
 	// If not activated, set 1 TRX of activation fee (in SUN)
 	if err != nil || toAccount.Address == nil {
-		activationFee, _ = decimals.ApplyDecimals(big.NewFloat(1), trxDecimals) // 1 TRX in SUN
+		activationFee, _ = decimals.ApplyDecimals(big.NewFloat(1), int64(trxDecimals)) // 1 TRX in SUN
 	}
 
 	// Create tx to measure raw data size (don't send it)
@@ -703,7 +723,7 @@ func (tron *Tron) calcNativeFee(fromAddr, toAddr string, amount float64) (float6
 	// Get total fee in SUN
 	totalFeeSun := bandwidthCost + activationFee.Int64()
 	// Convert total fee to TRX
-	totalFee, _ := decimals.RemoveDecimals(big.NewInt(totalFeeSun), trxDecimals).Float64()
+	totalFee, _ := decimals.RemoveDecimals(big.NewInt(totalFeeSun), int64(trxDecimals)).Float64()
 
 	return totalFee, nil
 }
@@ -741,7 +761,7 @@ func (tron *Tron) calcTrc20Fee(currency, fromAddr, toAddr string, amount float64
 	amountSun, _ := decimals.ApplyDecimals(big.NewFloat(amount), contractDecimals.Int64())
 
 	// Calc exact needed energy value
-	var energyNeeded int64
+	var energyNeeded int
 	energyEstimate, err := tron.Client.EstimateEnergy(
 		fromAddr, contractAddr,
 		"transfer(address,uint256)",
@@ -750,7 +770,7 @@ func (tron *Tron) calcTrc20Fee(currency, fromAddr, toAddr string, amount float64
 	)
 	// If err returned, get needed energy value from config
 	if err != nil {
-		energyNeeded, err = config.GetChainSetting[int64](
+		energyNeeded, err = config.GetChainSetting[int](
 			config.TokenSettings,
 			fmt.Sprintf("%s.%s.estimated_energy", tron.NetworkCode, currency),
 		)
@@ -758,7 +778,7 @@ func (tron *Tron) calcTrc20Fee(currency, fromAddr, toAddr string, amount float64
 			return 0, fmt.Errorf("failed to get estimated_energy for %s from config: %w", currency, err)
 		}
 	} else {
-		energyNeeded = energyEstimate.EnergyRequired
+		energyNeeded = int(energyEstimate.EnergyRequired)
 	}
 
 	// Check, if to address account has USDT (affects cost)
@@ -786,49 +806,49 @@ func (tron *Tron) calcTrc20Fee(currency, fromAddr, toAddr string, amount float64
 		return 0, fmt.Errorf("failed to marshal TRC20 transaction raw data: %v", err)
 	}
 	// Get needed bandwidth - length of serialized data (~345 bytes for TRC20)
-	bandwidthNeeded := int64(len(rawDataBytes))
+	bandwidthNeeded := len(rawDataBytes)
 
 	// Calc energy and bandwidth cost
-	energyCost := int64(0)
-	bandwidthCost := int64(0)
+	energyCost := 0
+	bandwidthCost := 0
 	// Get from address account resources info
 	resources, err := tron.Client.GetAccountResource(fromAddr)
 	if err == nil {
 		// Calc available account energy
-		availableEnergy := resources.EnergyLimit - resources.EnergyUsed
+		availableEnergy := int(resources.EnergyLimit - resources.EnergyUsed)
 		if availableEnergy < energyNeeded {
 			paidEnergy := energyNeeded - availableEnergy
 			if paidEnergy < 0 {
 				paidEnergy = 0
 			}
-			energyCost = paidEnergy * chainParams["energyPrice"]
+			energyCost = paidEnergy * int(chainParams["energyPrice"])
 		}
 
 		// Calc available account bandwidth
-		availableBandwidth := (resources.NetLimit - resources.NetUsed) +
-			(resources.FreeNetLimit - resources.FreeNetUsed)
+		availableBandwidth := int((resources.NetLimit - resources.NetUsed) +
+			(resources.FreeNetLimit - resources.FreeNetUsed))
 		if availableBandwidth < bandwidthNeeded {
 			paidBandwidth := bandwidthNeeded - availableBandwidth
 			if paidBandwidth < 0 {
 				paidBandwidth = 0
 			}
-			bandwidthCost = paidBandwidth * chainParams["bandwidthPrice"]
+			bandwidthCost = paidBandwidth * int(chainParams["bandwidthPrice"])
 		}
 	} else {
 		// If we cannot get resources, need to pay for all
-		energyCost = energyNeeded * chainParams["energyPrice"]
-		bandwidthCost = bandwidthNeeded * chainParams["bandwidthPrice"]
+		energyCost = energyNeeded * int(chainParams["energyPrice"])
+		bandwidthCost = bandwidthNeeded * int(chainParams["bandwidthPrice"])
 	}
 
 	// Get total fee in SUN
 	totalFeeUnits := energyCost + bandwidthCost
 	// Get TRX decimals
-	trxDecimals, _ := config.GetChainSetting[int64](
+	trxDecimals, _ := config.GetChainSetting[int](
 		config.TokenSettings,
 		fmt.Sprintf("%s.%s.decimals", tron.NetworkCode, "TRX"),
 	)
 	// Convert total fee to TRX
-	totalFee, _ := decimals.RemoveDecimals(big.NewInt(totalFeeUnits), trxDecimals).Float64()
+	totalFee, _ := decimals.RemoveDecimals(big.NewInt(int64(totalFeeUnits)), int64(trxDecimals)).Float64()
 
 	return totalFee, nil
 }
@@ -880,12 +900,12 @@ func (tron *Tron) sendNative(fromAddr, toAddr string, amount float64, privateKey
 	}
 
 	// Get TRX decimals
-	trxDecimals, _ := config.GetChainSetting[int64](
+	trxDecimals, _ := config.GetChainSetting[int](
 		config.TokenSettings,
 		fmt.Sprintf("%s.%s.decimals", tron.NetworkCode, "TRX"),
 	)
 	// Convert amount to SUN including decimals
-	amountSun, _ := decimals.ApplyDecimals(big.NewFloat(amount), trxDecimals)
+	amountSun, _ := decimals.ApplyDecimals(big.NewFloat(amount), int64(trxDecimals))
 
 	// Create TRX transaction
 	tx, err := tron.Client.Transfer(fromAddr, toAddr, amountSun.Int64())

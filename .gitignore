@@ -43,9 +43,6 @@ Thumbs.db
 coverage.out
 coverage.html
 
-# Air (hot reload)
-tmp/
-
 # Configs with secrets
 config.local.yaml
 *.local.yaml

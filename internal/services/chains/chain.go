@@ -83,6 +83,9 @@ func ProcessInboundTransactions(ctx context.Context) error {
 				log.Printf("[ProcessInboundTransactions] [%s] Failed to get transactions list: %v", network, err)
 				return
 			}
+			if len(txList) == 0 {
+				log.Printf("[ProcessInboundTransactions] [%s] No transactions found", network)
+			}
 
 			// Timeout for network processing (60 seconds for all transactions)
 			netCtx, cancel := context.WithTimeout(ctx, 60*time.Second)

@@ -3,6 +3,7 @@ package tasks
 import (
 	"context"
 	"log"
+	"time"
 
 	"wallets/internal/services/chains"
 )
@@ -15,6 +16,7 @@ func NewRefillsTask() *RefillsTask {
 	return &RefillsTask{
 		BaseTask: BaseTask{
 			maxRetries:  3,
+			timeout:     time.Second * 5,
 			name:        "refills",
 			description: "Process refills",
 		},

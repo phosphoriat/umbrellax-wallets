@@ -62,9 +62,12 @@ func (c *HTTPClient) GetCoinInfo(coin, network string) (map[string]any, error) {
 	if !ok {
 		return nil, fmt.Errorf("coin '%s' not found", coin)
 	}
+
+	coinValue, _ := utils.DataGet(rowData, "coin")
+	nameValue, _ := utils.DataGet(rowData, "name")
 	result := map[string]any{
-		"coin": utils.DataGet(rowData, "coin"),
-		"name": utils.DataGet(rowData, "name"),
+		"coin": coinValue,
+		"name": nameValue,
 	}
 
 	chains, ok := utils.DataGet(rowData, "chains")

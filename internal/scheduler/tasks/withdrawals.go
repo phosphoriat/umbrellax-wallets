@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"time"
 
 	"wallets/internal/config"
 	"wallets/internal/database/redis"
@@ -27,6 +28,7 @@ func NewWithdrawalsTask() *WithdrawalsTask {
 	return &WithdrawalsTask{
 		BaseTask: BaseTask{
 			maxRetries:  3,
+			timeout:     10 * time.Second,
 			name:        "withdrawals",
 			description: "Process withdrawals",
 		},
@@ -61,7 +63,7 @@ func (t *WithdrawalsTask) Execute(ctx context.Context) error {
 
 // @private processItem Process hash item
 func (t *WithdrawalsTask) processItem(ctx context.Context, requestId, itemStr string) error {
-	// Unmarshalling json item string
+	// Unmarshalling JSON item string
 	var item map[string]any
 	err := json.Unmarshal([]byte(itemStr), &item)
 	if err != nil {

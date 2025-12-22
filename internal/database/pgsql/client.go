@@ -52,7 +52,7 @@ func Close() error {
 func newPgSQLClient(cfg *config.Config) (*Client, error) {
 	// Form DSN PostgreSQL connection configuration string
 	dsn := fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%s sslmode=%s",
-		cfg.DbHost, cfg.DbUser, cfg.DbPassword, cfg.DbName, cfg.DbPort, cfg.DbSslMode)
+		cfg.PgSqlHost, cfg.PgSqlUser, cfg.PgSqlPassword, cfg.PgSqlName, cfg.PgSqlPort, cfg.PgSqlSslMode)
 
 	// Open PostgreSQL connection
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})

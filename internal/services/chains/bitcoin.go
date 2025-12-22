@@ -58,28 +58,35 @@ func GetBitcoin() *Bitcoin {
 	return btcInstance
 }
 
-// @private newBitcoin Create new instance of Tron (private constructor)
+// @private newBitcoin Create new instance of Bitcoin (private constructor)
 func newBitcoin() *Bitcoin {
 	// Load config
 	cfg, _ := config.Load()
 
 	// Create RPC client with default options
 	client, err := rpcclient.New(&rpcclient.ConnConfig{
-		Host:         cfg.BtcRpcUrl,
+		Host:         cfg.BtcNodeUrl,
+		User:         cfg.BtcNodeUser,
+		Pass:         cfg.BtcNodePass,
 		HTTPPostMode: true,
 		DisableTLS:   false,
-		ExtraHeaders: map[string]string{
-			"x-api-key":    cfg.TatumApiKey,
-			"Content-Type": "application/json",
-		},
 	}, nil)
 	if err != nil {
-		log.Printf("[Bitcoin] Failed to connect to RPC API: %v", err)
+		log.Fatalf("[Bitcoin] Failed to connect to RPC API: %v", err)
 	}
 
 	networkCode := "bitcoin"
 	// Get network settings
 	networkSettings := config.NetworkSettings[networkCode].(map[string]any)
+
+	// @TODO Remove
+	// Test query
+	log.Printf("[Bitcoin] Testing connection...")
+	height, err := client.GetBlockCount()
+	if err != nil {
+		log.Printf("[Bitcoin] Connection test failed: %v", err)
+	}
+	log.Printf("[Bitcoin] Connected successfully, block height: %d", height)
 
 	return &Bitcoin{
 		BaseChainService: BaseChainService{
@@ -430,8 +437,10 @@ func (btc *Bitcoin) GetInboundTransactions() ([]*InboundTransaction, error) {
 	// Get last block height from Redis
 	lastBlockStr, err := redis.GetClient().HGet(ctx, "last_blocks", btc.NetworkCode)
 	var lastBlockHeight int64
-	if err != nil {
-		lastBlockHeight = currentBlockHeight
+	if err != nil || lastBlockStr == "" {
+		lastBlockHeight = currentBlockHeight - 10
+		log.Printf("[%s] First run, starting from block %d (current: %d)",
+			btc.NetworkCode, lastBlockHeight, currentBlockHeight)
 	} else {
 		lastBlockHeight, _ = strconv.ParseInt(lastBlockStr, 10, 64)
 	}
@@ -449,7 +458,7 @@ func (btc *Bitcoin) GetInboundTransactions() ([]*InboundTransaction, error) {
 	}
 
 	// Get BTC decimals from config
-	btcDecimals, err := config.GetChainSetting[int64](
+	btcDecimals, err := config.GetChainSetting[int](
 		config.TokenSettings,
 		fmt.Sprintf("%s.%s.decimals", btc.NetworkCode, "BTC"),
 	)
@@ -562,7 +571,7 @@ func (btc *Bitcoin) GetInboundTransactions() ([]*InboundTransaction, error) {
 							}
 
 							// Get convert amount (in BTC)
-							amount := utils.RemoveDecimals(big.NewInt(vout.Value), btcDecimals)
+							amount := utils.RemoveDecimals(big.NewInt(vout.Value), int64(btcDecimals))
 
 							localTxList = append(localTxList, &InboundTransaction{
 								UserId:   int(userId),

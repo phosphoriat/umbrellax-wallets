@@ -30,34 +30,36 @@ func (r *TaskRegistry) GetAllTaskDefinitions() []*TaskDefinition {
 func (r *TaskRegistry) initializeDefinitions() []*TaskDefinition {
 	var definitions []*TaskDefinition
 
-	// Process withdrawal requests (every 10 seconds)
-	definitions = append(definitions, NewTaskDefinition(
-		NewWithdrawRequestTask(),
-		TaskSchedule{
-			Type:               ScheduleTypeInterval,
-			Interval:           "10s",
-			SkipIfStillRunning: true,
-		},
-		true,
-	))
+	/*
+		// Process withdrawal requests (every 10 seconds)
+		definitions = append(definitions, NewTaskDefinition(
+			NewWithdrawRequestsTask(),
+			TaskSchedule{
+				Type:               ScheduleTypeInterval,
+				Interval:           "10s",
+				SkipIfStillRunning: true,
+			},
+			true,
+		))
 
-	// Process withdrawals (every 10 seconds)
-	definitions = append(definitions, NewTaskDefinition(
-		NewWithdrawalsTask(),
-		TaskSchedule{
-			Type:               ScheduleTypeInterval,
-			Interval:           "10s",
-			SkipIfStillRunning: true,
-		},
-		true,
-	))
+		// Process withdrawals (every 10 seconds)
+		definitions = append(definitions, NewTaskDefinition(
+			NewWithdrawalsTask(),
+			TaskSchedule{
+				Type:               ScheduleTypeInterval,
+				Interval:           "10s",
+				SkipIfStillRunning: true,
+			},
+			true,
+		))
+	*/
 
 	// Process inbound transactions (every 30 seconds)
 	definitions = append(definitions, NewTaskDefinition(
 		NewRefillsTask(),
 		TaskSchedule{
 			Type:               ScheduleTypeInterval,
-			Interval:           "30s",
+			Interval:           "5s",
 			SkipIfStillRunning: true,
 		},
 		true,

@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -18,15 +19,16 @@ import (
 
 // Scheduler instance
 type Scheduler struct {
-	scheduler gocron.Scheduler
-	tasks     map[string]*tasks.TaskDefinition
-	jobs      map[string]gocron.Job
-	callbacks []tasks.TaskCallback
-	mu        sync.RWMutex
-	ctx       context.Context
-	cancel    context.CancelFunc
-	location  *time.Location
-	running   bool
+	scheduler  gocron.Scheduler
+	tasks      map[string]*tasks.TaskDefinition
+	jobs       map[string]gocron.Job
+	callbacks  []tasks.TaskCallback
+	mu         sync.RWMutex
+	ctx        context.Context
+	cancel     context.CancelFunc
+	location   *time.Location
+	running    bool
+	callbackWg sync.WaitGroup
 }
 
 // SchedulerOptions Options for create scheduler instance
@@ -67,7 +69,14 @@ func Init() {
 	}
 
 	// Add logger callback
-	schedulerInstance.AddCallback(func(execution *tasks.TaskExecution) {
+	schedulerInstance.AddCallback(func(ctx context.Context, execution *tasks.TaskExecution) {
+		// Check context cancellation (need in every callback body)
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
 		status := "✓"
 		if !execution.Success {
 			status = "✗"
@@ -164,20 +173,24 @@ func (s *Scheduler) Start() error {
 // Shutdown Gracefully scheduler shutdown
 func (s *Scheduler) Shutdown() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if !s.running {
+		s.mu.Unlock()
 		return nil
 	}
+	s.running = false
+	s.mu.Unlock()
 
 	log.Println("Shutting down scheduler...")
 
 	// Cancel our internal context, that all tasks receive a stop signal
 	s.cancel()
 
-	// Graceful shutdown
+	// Graceful stop the scheduler
 	err := s.scheduler.Shutdown()
-	s.running = false
+
+	// Wait for completion of all callback goroutines
+	log.Println("Waiting for callbacks to complete...")
+	s.callbackWg.Wait()
 
 	log.Println("Scheduler stopped")
 	return err
@@ -361,8 +374,13 @@ func (s *Scheduler) executeTask(ctx context.Context, task tasks.ScheduledTask) e
 		// Increase retries count
 		execution.RetryCount = attempt
 
-		// Execute task
-		err := s.runTask(ctx, task)
+		// Create context with timeout for each attempt
+		timeout := task.GetTimeout()
+		taskCtx, cancel := context.WithTimeout(ctx, timeout)
+
+		// Execute task with timeout
+		err := s.runTask(taskCtx, task)
+		cancel()
 
 		// Execution successful
 		if err == nil {
@@ -375,6 +393,12 @@ func (s *Scheduler) executeTask(ctx context.Context, task tasks.ScheduledTask) e
 
 			s.notifyCallbacks(execution)
 			return nil
+		}
+
+		// Process timeout error
+		if errors.Is(err, context.DeadlineExceeded) {
+			log.Printf("Task %s timed out after %v on attempt %d",
+				task.GetName(), timeout, attempt+1)
 		}
 
 		// Execution failed
@@ -390,8 +414,7 @@ func (s *Scheduler) executeTask(ctx context.Context, task tasks.ScheduledTask) e
 			case <-time.After(backoff):
 				continue
 			case <-ctx.Done():
-				lastErr = ctx.Err()
-				break
+				return ctx.Err()
 			}
 		} else {
 			break
@@ -436,7 +459,12 @@ func (s *Scheduler) notifyCallbacks(execution *tasks.TaskExecution) {
 	}
 
 	for i, callback := range s.callbacks {
+		// Increase counter before starting
+		s.callbackWg.Add(1)
+
 		go func(callbackIndex int, cb tasks.TaskCallback) {
+			// Reduce counter at completion
+			defer s.callbackWg.Done()
 			// Deferred panic protection
 			defer func() {
 				if r := recover(); r != nil {
@@ -445,21 +473,25 @@ func (s *Scheduler) notifyCallbacks(execution *tasks.TaskExecution) {
 				}
 			}()
 
-			// Set 10 second timeout for callback execution
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			// Set 5 second timeout for callback execution (use the parent scheduler context)
+			ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
 			defer cancel()
 
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
-				cb(execution)
+				cb(ctx, execution)
 			}()
 
 			select {
 			case <-done:
 			case <-ctx.Done():
-				log.Printf("[WARN] Callback %d timeout for task: %s",
-					callbackIndex, execution.TaskName)
+				if errors.Is(ctx.Err(), context.Canceled) {
+					log.Printf("[INFO] Callback %d cancelled during shutdown", callbackIndex)
+				} else {
+					log.Printf("[WARN] Callback %d timeout for task: %s",
+						callbackIndex, execution.TaskName)
+				}
 			}
 		}(i, callback)
 	}

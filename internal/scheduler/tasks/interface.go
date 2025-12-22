@@ -20,6 +20,9 @@ type ScheduledTask interface {
 	// GetMaxRetries Get maximum count of retries
 	GetMaxRetries() int
 
+	// GetTimeout Get timeout for task execution
+	GetTimeout() time.Duration
+
 	// ShouldRetry Determines whether the task should be retried on error
 	ShouldRetry(err error) bool
 }
@@ -64,7 +67,7 @@ type TaskExecution struct {
 }
 
 // TaskCallback Callback function
-type TaskCallback func(execution *TaskExecution)
+type TaskCallback func(ctx context.Context, execution *TaskExecution)
 
 // TaskDefinition Definition task with schedule
 type TaskDefinition struct {

@@ -32,7 +32,9 @@ import (
 // Bsc RPC connection struct
 type Bsc struct {
 	BaseChainService
-	Client *ethclient.Client
+	Client          *ethclient.Client
+	decimalsCache   map[string]int64
+	decimalsCacheMu sync.RWMutex
 }
 
 // Global package vars
@@ -55,7 +57,7 @@ func newBsc() *Bsc {
 	cfg, _ := config.Load()
 
 	// Create new RPC client
-	bscClient, err := ethclient.Dial(cfg.BscRrcUrl)
+	bscClient, err := ethclient.Dial(cfg.BscRpcUrl)
 	if err != nil {
 		log.Printf("[BSC] Failed to connect to RPC API: %v", err)
 	}
@@ -99,7 +101,7 @@ func (bsc *Bsc) GetUserWallet(userId int) (string, error) {
 }
 
 // GetMasterWallet Get master wallet info (address and token balances)
-// Returns: Map of mster wallet info (address and balances of all available tokens)
+// Returns: Map of master wallet info (address and balances of all available tokens)
 func (bsc *Bsc) GetMasterWallet() (map[string]any, error) {
 	// Get master wallet info from Vault
 	masterData, err := vault.GetClient().GetSecret("/master/" + bsc.NetworkCode)
@@ -268,8 +270,10 @@ func (bsc *Bsc) GetInboundTransactions() ([]*InboundTransaction, error) {
 	// Get last block number from Redis (or use current block number, if not exists)
 	lastBlock, err := redis.GetClient().HGet(ctx, "last_blocks", bsc.NetworkCode)
 	var lastBlockNumber uint64
-	if err != nil {
-		lastBlockNumber = currentBlockNum
+	if err != nil || lastBlock == "" {
+		lastBlockNumber = currentBlockNum - 10
+		log.Printf("[%s] First run, starting from block %d (current: %d)",
+			bsc.NetworkCode, lastBlockNumber, currentBlockNum)
 	} else {
 		parsed, _ := strconv.ParseUint(lastBlock, 10, 64)
 		lastBlockNumber = parsed
@@ -294,7 +298,7 @@ func (bsc *Bsc) GetInboundTransactions() ([]*InboundTransaction, error) {
 	}
 
 	// Get BNB decimals from config
-	bnbDecimals, err := config.GetChainSetting[int64](
+	bnbDecimals, err := config.GetChainSetting[int](
 		config.TokenSettings,
 		fmt.Sprintf("%s.%s.decimals", bsc.NetworkCode, "BNB"),
 	)
@@ -314,10 +318,6 @@ func (bsc *Bsc) GetInboundTransactions() ([]*InboundTransaction, error) {
 	if err != nil {
 		return nil, fmt.Errorf("[%s] Failed to parse BEP20 ABI from config: %w", bsc.NetworkCode, err)
 	}
-
-	// Cache for token decimals
-	decimalsCache := make(map[string]int64)
-	var decimalsCacheMu sync.RWMutex
 
 	// Wait group to wait for all tx blocks goroutines to complete
 	var wg sync.WaitGroup
@@ -382,7 +382,7 @@ func (bsc *Bsc) GetInboundTransactions() ([]*InboundTransaction, error) {
 						}
 
 						// Get converted amount (in BNB)
-						amount := utils.RemoveDecimals(tx.Value(), bnbDecimals)
+						amount := utils.RemoveDecimals(tx.Value(), int64(bnbDecimals))
 
 						localTxList = append(localTxList, &InboundTransaction{
 							UserId:   int(userId),
@@ -417,9 +417,9 @@ func (bsc *Bsc) GetInboundTransactions() ([]*InboundTransaction, error) {
 						// Check if address exists in network addresses list
 						if userId, ok := addressList[toAddr]; ok {
 							// Get contract decimals from cache or fetch from contract
-							decimalsCacheMu.RLock()
-							cached, exists := decimalsCache[contractAddr]
-							decimalsCacheMu.RUnlock()
+							bsc.decimalsCacheMu.RLock()
+							cached, exists := bsc.decimalsCache[contractAddr]
+							bsc.decimalsCacheMu.RUnlock()
 
 							var decimalsValue int64
 							if exists {
@@ -440,9 +440,9 @@ func (bsc *Bsc) GetInboundTransactions() ([]*InboundTransaction, error) {
 								decimalsValue = *abi.ConvertType(out[0], new(int64)).(*int64)
 
 								// Save decimals to cache
-								decimalsCacheMu.Lock()
-								decimalsCache[contractAddr] = decimalsValue
-								decimalsCacheMu.Unlock()
+								bsc.decimalsCacheMu.Lock()
+								bsc.decimalsCache[contractAddr] = decimalsValue
+								bsc.decimalsCacheMu.Unlock()
 							}
 
 							// Get sender address
@@ -571,12 +571,12 @@ func (bsc *Bsc) getNativeBalance(addr string) (float64, error) {
 	}
 
 	// Get BNB decimals from config
-	bnbDecimals, _ := config.GetChainSetting[int64](
+	bnbDecimals, _ := config.GetChainSetting[int](
 		config.TokenSettings,
 		fmt.Sprintf("%s.%s.decimals", bsc.NetworkCode, "BNB"),
 	)
 	// Return converted balance (in BNB)
-	return utils.RemoveDecimals(rawBalance, bnbDecimals), nil
+	return utils.RemoveDecimals(rawBalance, int64(bnbDecimals)), nil
 }
 
 // @private getBep20Balance Get wallet BEP20 token balance
@@ -624,12 +624,12 @@ func (bsc *Bsc) getBep20Balance(contractAddr, addr string) (float64, error) {
 // Returns: Fee in BNB
 func (bsc *Bsc) calcNativeFee(fromAddr, toAddr string, amount float64) (float64, error) {
 	// Get BNB decimals from config
-	weiDecimals, _ := config.GetChainSetting[int64](
+	weiDecimals, _ := config.GetChainSetting[int](
 		config.TokenSettings,
 		fmt.Sprintf("%s.%s.decimals", bsc.NetworkCode, "BNB"),
 	)
 	// Convert amount to WEI
-	amountWei := utils.ApplyDecimals(amount, weiDecimals)
+	amountWei := utils.ApplyDecimals(amount, int64(weiDecimals))
 
 	// Get converted from and to addresses
 	from := common.HexToAddress(fromAddr)
@@ -654,7 +654,7 @@ func (bsc *Bsc) calcNativeFee(fromAddr, toAddr string, amount float64) (float64,
 	// Get total fee in WEI
 	totalFeeWei := new(big.Int).Mul(gasPrice, new(big.Int).SetUint64(gasLimit))
 	// Return converted total fee in BNB
-	return utils.RemoveDecimals(totalFeeWei, weiDecimals), nil
+	return utils.RemoveDecimals(totalFeeWei, int64(weiDecimals)), nil
 }
 
 // @private calcBep20Fee Calc fee for BEP20 token transaction
@@ -726,13 +726,13 @@ func (bsc *Bsc) calcBep20Fee(currency, fromAddr, toAddr string, amount float64) 
 	// Get total fee in WEI
 	totalFeeWei := new(big.Int).Mul(gasPrice, new(big.Int).SetUint64(gasLimit))
 	// Get BNB decimals from config
-	weiDecimals, _ := config.GetChainSetting[int64](
+	weiDecimals, _ := config.GetChainSetting[int](
 		config.TokenSettings,
 		fmt.Sprintf("%s.%s.decimals", bsc.NetworkCode, "BNB"),
 	)
 
 	// Return converted total fee in BNB
-	return utils.RemoveDecimals(totalFeeWei, weiDecimals), nil
+	return utils.RemoveDecimals(totalFeeWei, int64(weiDecimals)), nil
 }
 
 /* SendTransaction private methods group */
@@ -759,12 +759,12 @@ func (bsc *Bsc) sendNative(fromAddr, toAddr string, amount float64, privateKey s
 	}
 
 	// Get BNB decimals from config
-	weiDecimals, _ := config.GetChainSetting[int64](
+	weiDecimals, _ := config.GetChainSetting[int](
 		config.TokenSettings,
 		fmt.Sprintf("%s.%s.decimals", bsc.NetworkCode, "BNB"),
 	)
 	// Convert amount to WEI
-	amountWei := utils.ApplyDecimals(amount, weiDecimals)
+	amountWei := utils.ApplyDecimals(amount, int64(weiDecimals))
 
 	// Get converted from and to address
 	from := common.HexToAddress(fromAddr)

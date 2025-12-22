@@ -52,9 +52,9 @@ func GetAvailableNetworks() []string {
 // init Register chain services (will auto-exec, when package imports in main.go)
 func init() {
 	RegisterChainService("tron", func() ChainService { return GetTron() })
-	RegisterChainService("ethereum", func() ChainService { return GetEthereum() })
-	RegisterChainService("bsc", func() ChainService { return GetBsc() })
-	RegisterChainService("ton", func() ChainService { return GetTon() })
-	RegisterChainService("bitcoin", func() ChainService { return GetBitcoin() })
-	RegisterChainService("solana", func() ChainService { return GetSolana() })
+	//RegisterChainService("ethereum", func() ChainService { return GetEthereum() })
+	//RegisterChainService("bsc", func() ChainService { return GetBsc() })
+	//RegisterChainService("ton", func() ChainService { return GetTon() })
+	//RegisterChainService("bitcoin", func() ChainService { return GetBitcoin() })
+	//RegisterChainService("solana", func() ChainService { return GetSolana() })
 }

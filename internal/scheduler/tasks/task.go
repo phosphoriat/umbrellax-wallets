@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"os"
+	"time"
 )
 
 type BaseTask struct {
 	name        string
+	timeout     time.Duration
 	description string
 	maxRetries  int
 }
@@ -20,6 +22,11 @@ func (b *BaseTask) GetName() string {
 // GetDescription Get task description
 func (b *BaseTask) GetDescription() string {
 	return b.description
+}
+
+// GetTimeout Get timeout for task execution
+func (b *BaseTask) GetTimeout() time.Duration {
+	return b.timeout
 }
 
 // GetMaxRetries Get maximum count of retries

@@ -9,9 +9,8 @@ import (
 )
 
 type Config struct {
-	AppUrl          string
-	AppPort         string
-	NotificatorPort string
+	AppUrl  string
+	AppPort string
 	// PostgreSQL
 	PgSqlHost     string
 	PgSqlPort     string
@@ -48,8 +47,8 @@ type Config struct {
 	NatsPassword string
 	NatsQueue    string
 	// Bybit
-	BybitApiUrl    string
 	BybitWsUrl     string
+	BybitApiUrl    string
 	BybitApiKey    string
 	BybitApiSecret string
 	// AML
@@ -57,16 +56,18 @@ type Config struct {
 	AmlApiKey    string
 	AmlApiSecret string
 	AmlCheckCost string
-	// RPC urls
-	TronRpcUrl string
-	EthRpcUrl  string
-	BscRrcUrl  string
-	TonRpcUrl  string
-	BtcRpcUrl  string
-	SolRpcUrl  string
-	// Tatum
-	TatumApiKey  string
-	TatumWebhook string
+	// QuickNode
+	QuickNodeApiKey string
+	// Chains
+	TronRpcUrl   string
+	EthRpcUrl    string
+	BscRpcUrl    string
+	SolRpcUrl    string
+	TonConfigUrl string
+	TonHttpUrl   string
+	BtcNodeUrl   string
+	BtcNodeUser  string
+	BtcNodePass  string
 }
 
 // Load config from env and return Config struct
@@ -78,21 +79,20 @@ func Load() (*Config, error) {
 	}
 
 	return &Config{
-		AppUrl:          getEnv("APP_URL", ""),
-		AppPort:         getEnv("APP_PORT", ""),
-		NotificatorPort: getEnv("NOTIFICATOR_PORT", ""),
+		AppUrl:  getEnv("APP_URL", ""),
+		AppPort: getEnv("APP_PORT", ""),
 		// PostgreSQL
 		PgSqlHost:     getEnv("PGSQL_HOST", "localhost"),
 		PgSqlPort:     getEnv("PGSQL_PORT", "5432"),
 		PgSqlName:     getEnv("PGSQL_DATABASE", ""),
-		PgSqlUser:     getEnv("PGSQL_USER", ""),
+		PgSqlUser:     getEnv("PGSQL_USERNAME", ""),
 		PgSqlPassword: getEnv("PGSQL_PASSWORD", ""),
 		PgSqlSslMode:  getEnv("PGSQL_SSL_MODE", "required"),
 		// ClickHouse
 		ClickHouseHost:     getEnv("CH_HOST", "localhost"),
 		ClickHousePort:     getEnv("CH_PORT", "8123"),
 		ClickHouseName:     getEnv("CH_DATABASE", ""),
-		ClickHouseUser:     getEnv("CH_USER", ""),
+		ClickHouseUser:     getEnv("CH_USERNAME", ""),
 		ClickHousePassword: getEnv("CH_PASSWORD", ""),
 		// Redis
 		RedisHost:                getEnv("REDIS_HOST", "localhost"),
@@ -117,8 +117,8 @@ func Load() (*Config, error) {
 		NatsPassword: getEnv("NATS_PASSWORD", ""),
 		NatsQueue:    getEnv("NATS_QUEUE", ""),
 		// Bybit
-		BybitApiUrl:    getEnv("BYBIT_API_URL", ""),
 		BybitWsUrl:     getEnv("BYBIT_WS_URL", ""),
+		BybitApiUrl:    getEnv("BYBIT_API_URL", ""),
 		BybitApiKey:    getEnv("BYBIT_API_KEY", ""),
 		BybitApiSecret: getEnv("BYBIT_API_SECRET", ""),
 		// AML
@@ -126,16 +126,18 @@ func Load() (*Config, error) {
 		AmlApiKey:    getEnv("AML_API_KEY", ""),
 		AmlApiSecret: getEnv("AML_API_SECRET", ""),
 		AmlCheckCost: getEnv("AML_CHECK_COST", "0"),
-		// RPC urls
-		TronRpcUrl: getEnv("TRON_RPC_URL", ""),
-		EthRpcUrl:  getEnv("ETH_RPC_URL", ""),
-		BscRrcUrl:  getEnv("BSC_RRC_URL", ""),
-		TonRpcUrl:  getEnv("TON_RPC_URL", ""),
-		BtcRpcUrl:  getEnv("BTC_RPC_URL", ""),
-		SolRpcUrl:  getEnv("SOL_RPC_URL", ""),
-		// Tatum
-		TatumApiKey:  getEnv("TATUM_API_KEY", ""),
-		TatumWebhook: getEnv("TATUM_WEBHOOK", ""),
+		// QuickNode
+		QuickNodeApiKey: getEnv("QUICKNODE_API_KEY", ""),
+		// Chains
+		TronRpcUrl:   getEnv("TRON_RPC_URL", ""),
+		EthRpcUrl:    getEnv("ETH_RPC_URL", ""),
+		BscRpcUrl:    getEnv("BSC_RPC_URL", ""),
+		SolRpcUrl:    getEnv("SOL_RPC_URL", ""),
+		TonConfigUrl: getEnv("TON_CONFIG_URL", ""),
+		TonHttpUrl:   getEnv("TON_HTTP_URL", ""),
+		BtcNodeUrl:   getEnv("BTC_NODE_URL", ""),
+		BtcNodeUser:  getEnv("BTC_NODE_USER", ""),
+		BtcNodePass:  getEnv("BTC_NODE_PASS", ""),
 	}, nil
 }
 
