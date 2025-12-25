@@ -5,10 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"os"
-	"os/signal"
 	"sync"
-	"syscall"
 	"time"
 
 	"wallets/internal/scheduler/tasks"
@@ -39,9 +36,14 @@ type SchedulerOptions struct {
 }
 
 // Init scheduler
-func Init() {
+func Init() (*Scheduler, error) {
 	// Define scheduler options
-	location, _ := time.LoadLocation("Europe/Moscow")
+	location, err := time.LoadLocation("Europe/Moscow")
+	if err != nil {
+		log.Printf("Failed to load timezone: %v, using UTC", err)
+		location = time.UTC
+	}
+
 	schedulerOpts := &SchedulerOptions{
 		Location: location,
 		SchedulerOptions: []gocron.SchedulerOption{
@@ -65,12 +67,19 @@ func Init() {
 	// Create scheduler instance
 	schedulerInstance, err := NewScheduler(schedulerOpts)
 	if err != nil {
-		log.Fatalf("Failed to create scheduler: %v", err)
+		return nil, fmt.Errorf("failed to create scheduler: %w", err)
 	}
 
-	// Add logger callback
+	// Scheduler level callback (after every task execution)
 	schedulerInstance.AddCallback(func(ctx context.Context, execution *tasks.TaskExecution) {
-		// Check context cancellation (need in every callback body)
+		// Deferred panic protection
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[ERROR] Scheduler logger callback failed: %v", r)
+			}
+		}()
+
+		// Check context cancellation
 		select {
 		case <-ctx.Done():
 			return
@@ -85,36 +94,26 @@ func Init() {
 		log.Printf("%s Task: %s | Duration: %v | Attempts: %d",
 			status, execution.TaskName, execution.Duration, execution.RetryCount+1)
 		if execution.Error != nil {
-			log.Printf("  Error: %v", execution.Error)
+			log.Printf(" | Error: %v", execution.Error)
 		}
 	})
 
 	// Register all enabled tasks
-	taskDefs := tasks.NewTaskRegistry().GetAllTaskDefinitions()
+	taskDefs := tasks.GetRegistry().GetAllTaskDefinitions()
 	for _, def := range taskDefs {
 		if err := schedulerInstance.AddTaskDefinition(def); err != nil {
-			log.Fatalf("Failed to add task %s: %v", def.Task.GetName(), err)
+			return nil, fmt.Errorf("failed to add task %s: %w", def.Task.GetName(), err)
 		}
 	}
 
 	// Start scheduler
 	if err := schedulerInstance.Start(); err != nil {
-		log.Fatalf("Failed to start scheduler: %v", err)
+		return nil, fmt.Errorf("failed to start scheduler: %w", err)
 	}
 	log.Printf("Scheduler is running in %s timezone with %d tasks",
 		location.String(), len(taskDefs))
 
-	// Graceful shutdown
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-	<-c
-
-	log.Println("Shutting down scheduler...")
-	if err := schedulerInstance.Shutdown(); err != nil {
-		log.Printf("Error during shutdown: %v", err)
-	} else {
-		log.Println("Scheduler stopped gracefully")
-	}
+	return schedulerInstance, nil
 }
 
 // NewScheduler Create new Scheduler instance
@@ -226,6 +225,8 @@ func (s *Scheduler) AddTaskDefinition(taskDefinition *tasks.TaskDefinition) erro
 
 // AddCallback Add callback for results
 func (s *Scheduler) AddCallback(callback tasks.TaskCallback) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.callbacks = append(s.callbacks, callback)
 }
 
@@ -384,14 +385,20 @@ func (s *Scheduler) executeTask(ctx context.Context, task tasks.ScheduledTask) e
 
 		// Execution successful
 		if err == nil {
+			now := time.Now()
 			execution.Success = true
-			execution.EndTime = &[]time.Time{time.Now()}[0]
+			execution.EndTime = &now
 			execution.Duration = execution.EndTime.Sub(execution.StartTime)
 
 			log.Printf("✓ Task %s completed successfully (duration: %v, attempts: %d)",
 				task.GetName(), execution.Duration, attempt+1)
 
-			s.notifyCallbacks(execution)
+			// Run scheduler level callbacks
+			s.runSchedulerCallbacks(execution)
+
+			// Run task level callback
+			s.runTaskCallback(task.GetName(), execution)
+
 			return nil
 		}
 
@@ -408,8 +415,8 @@ func (s *Scheduler) executeTask(ctx context.Context, task tasks.ScheduledTask) e
 			log.Printf("Task %s failed on attempt %d, retrying: %v",
 				task.GetName(), attempt+1, err)
 
-			// Exponential delay
-			backoff := time.Duration(attempt+1) * time.Second
+			// Linear delay
+			backoff := time.Second
 			select {
 			case <-time.After(backoff):
 				continue
@@ -422,15 +429,17 @@ func (s *Scheduler) executeTask(ctx context.Context, task tasks.ScheduledTask) e
 	}
 
 	// All retries are failed
+	now := time.Now()
 	execution.Success = false
 	execution.Error = lastErr
-	execution.EndTime = &[]time.Time{time.Now()}[0]
+	execution.EndTime = &now
 	execution.Duration = execution.EndTime.Sub(execution.StartTime)
 
 	log.Printf("Task %s failed after %d attempts: %v (duration: %v)",
 		task.GetName(), maxRetries+1, lastErr, execution.Duration)
 
-	s.notifyCallbacks(execution)
+	// Run scheduler level callbacks
+	s.runSchedulerCallbacks(execution)
 	return lastErr
 }
 
@@ -439,7 +448,7 @@ func (s *Scheduler) runTask(ctx context.Context, task tasks.ScheduledTask) (err 
 	// Deferred panic protection
 	defer func() {
 		if r := recover(); r != nil {
-			err = fmt.Errorf("task panicked: %v", r)
+			err = fmt.Errorf("task error: %v", r)
 		}
 	}()
 
@@ -452,49 +461,77 @@ func (s *Scheduler) runTask(ctx context.Context, task tasks.ScheduledTask) (err 
 	return task.Execute(ctx)
 }
 
-// @private notifyCallbacks Notify all callbacks of execution result
-func (s *Scheduler) notifyCallbacks(execution *tasks.TaskExecution) {
+// @private runSchedulerCallbacks Run scheduler level callbacks
+func (s *Scheduler) runSchedulerCallbacks(execution *tasks.TaskExecution) {
 	if len(s.callbacks) == 0 {
 		return
 	}
 
-	for i, callback := range s.callbacks {
+	// Do not run callbacks after shutdown
+	s.mu.RLock()
+	if !s.running {
+		s.mu.RUnlock()
+		return
+	}
+
+	// Copy callbacks slice under lock and unlock after (Protection of slice modification)
+	callbacksCopy := make([]tasks.TaskCallback, len(s.callbacks))
+	copy(callbacksCopy, s.callbacks)
+	s.mu.RUnlock()
+
+	// Run goroutines without lock
+	for index, callback := range callbacksCopy {
 		// Increase counter before starting
 		s.callbackWg.Add(1)
 
-		go func(callbackIndex int, cb tasks.TaskCallback) {
+		go func() {
 			// Reduce counter at completion
 			defer s.callbackWg.Done()
 			// Deferred panic protection
 			defer func() {
 				if r := recover(); r != nil {
-					log.Printf("[ERROR] Callback %d panicked for task %s: %v",
-						callbackIndex, execution.TaskName, r)
+					log.Printf("[ERROR] Callback %d failed for task %s: %v",
+						index, execution.TaskName, r)
 				}
 			}()
 
-			// Set 5 second timeout for callback execution (use the parent scheduler context)
+			// Set 5 second timeout for callback execution
 			ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
 			defer cancel()
 
-			done := make(chan struct{})
-			go func() {
-				defer close(done)
-				cb(ctx, execution)
-			}()
-
-			select {
-			case <-done:
-			case <-ctx.Done():
-				if errors.Is(ctx.Err(), context.Canceled) {
-					log.Printf("[INFO] Callback %d cancelled during shutdown", callbackIndex)
-				} else {
-					log.Printf("[WARN] Callback %d timeout for task: %s",
-						callbackIndex, execution.TaskName)
-				}
-			}
-		}(i, callback)
+			callback(ctx, execution)
+		}()
 	}
+}
+
+// @private runTaskCallback Run task level callback
+func (s *Scheduler) runTaskCallback(taskName string, execution *tasks.TaskExecution) {
+	s.mu.RLock()
+	taskDef, exists := s.tasks[taskName]
+	s.mu.RUnlock()
+
+	if !exists || taskDef.Callback == nil {
+		return
+	}
+
+	// Increase counter before starting
+	s.callbackWg.Add(1)
+	go func() {
+		// Reduce counter at completion
+		defer s.callbackWg.Done()
+		// Deferred panic protection
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[ERROR] Task callback failed for %s: %v", taskName, r)
+			}
+		}()
+
+		// Set 5 second timeout for callback execution
+		ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
+		defer cancel()
+
+		taskDef.Callback(ctx, execution)
+	}()
 }
 
 // @private parseTimeString Parse time string to format "15:04" or "15:04:05"

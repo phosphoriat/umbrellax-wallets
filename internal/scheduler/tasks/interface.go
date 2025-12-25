@@ -63,7 +63,7 @@ type TaskExecution struct {
 	Success    bool
 	Error      error
 	RetryCount int
-	Context    map[string]interface{}
+	Context    map[string]any
 }
 
 // TaskCallback Callback function
@@ -74,6 +74,7 @@ type TaskDefinition struct {
 	ID       uuid.UUID
 	Task     ScheduledTask
 	Schedule TaskSchedule
+	Callback TaskCallback
 	Enabled  bool
 }
 
@@ -85,4 +86,10 @@ func NewTaskDefinition(task ScheduledTask, schedule TaskSchedule, enabled bool) 
 		Schedule: schedule,
 		Enabled:  enabled,
 	}
+}
+
+// WithCallback Add callback to task
+func (td *TaskDefinition) WithCallback(cb TaskCallback) *TaskDefinition {
+	td.Callback = cb
+	return td
 }

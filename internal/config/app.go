@@ -58,6 +58,7 @@ type Config struct {
 	AmlCheckCost string
 	// QuickNode
 	QuickNodeApiKey string
+	QuickNodeRps    int
 	// Chains
 	TronRpcUrl   string
 	EthRpcUrl    string
@@ -97,7 +98,7 @@ func Load() (*Config, error) {
 		// Redis
 		RedisHost:                getEnv("REDIS_HOST", "localhost"),
 		RedisPort:                getEnv("REDIS_PORT", "6379"),
-		RedisDatabase:            getEnvAsInt("REDIS_DATABASE", 3),
+		RedisDatabase:            getEnvAsInt("REDIS_DB", 2),
 		RedisPassword:            getEnv("REDIS_PASSWORD", ""),
 		RedisBybitReqsKey:        getEnv("REDIS_BYBIT_REQUESTS_KEY", ""),
 		RedisBybitWithdrawalsKey: getEnv("REDIS_BYBIT_WITHDRAWALS_KEY", ""),
@@ -128,6 +129,7 @@ func Load() (*Config, error) {
 		AmlCheckCost: getEnv("AML_CHECK_COST", "0"),
 		// QuickNode
 		QuickNodeApiKey: getEnv("QUICKNODE_API_KEY", ""),
+		QuickNodeRps:    getEnvAsInt("QUICKNODE_RPS", 15),
 		// Chains
 		TronRpcUrl:   getEnv("TRON_RPC_URL", ""),
 		EthRpcUrl:    getEnv("ETH_RPC_URL", ""),

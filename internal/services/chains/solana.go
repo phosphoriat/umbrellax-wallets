@@ -27,11 +27,13 @@ import (
 	"github.com/gagliardetto/solana-go/programs/system"
 	"github.com/gagliardetto/solana-go/programs/token"
 	"github.com/gagliardetto/solana-go/rpc"
+	"golang.org/x/time/rate"
 )
 
 type Solana struct {
 	BaseChainService
 	Client          *rpc.Client
+	RateLimit       int
 	decimalsCache   map[string]int64
 	decimalsCacheMu sync.RWMutex
 }
@@ -55,8 +57,8 @@ func newSolana() *Solana {
 	// Load config
 	cfg, _ := config.Load()
 
-	// Create RPC client
-	client := rpc.New(cfg.SolRpcUrl)
+	// Create new RPC client
+	client := rpc.New(cfg.SolRpcUrl + "/" + cfg.QuickNodeApiKey)
 
 	networkCode := "solana"
 	// Get network settings
@@ -68,7 +70,8 @@ func newSolana() *Solana {
 			NetworkCode: networkCode,
 			NativeToken: networkSettings["native_token"].(string),
 		},
-		Client: client,
+		Client:    client,
+		RateLimit: cfg.QuickNodeRps,
 	}
 }
 
@@ -272,10 +275,14 @@ func (sol *Solana) SendTransaction(wType string, wId *string, currency, toAddr s
 }
 
 // GetInboundTransactions Get new inbound transactions list
-func (sol *Solana) GetInboundTransactions() ([]*InboundTransaction, error) {
-	ctx := context.Background()
+func (sol *Solana) GetInboundTransactions(ctx context.Context) ([]*InboundTransaction, error) {
+	// Create rate limiter
+	limiter := rate.NewLimiter(rate.Limit(sol.RateLimit), 1)
 
 	// Get current block (slot) number
+	if err := limiter.Wait(ctx); err != nil {
+		return nil, err
+	}
 	currentBlockNum, err := sol.Client.GetSlot(ctx, rpc.CommitmentFinalized)
 	if err != nil {
 		return nil, fmt.Errorf("[%s] Failed to get current slot: %w", sol.NetworkCode, err)
@@ -285,7 +292,7 @@ func (sol *Solana) GetInboundTransactions() ([]*InboundTransaction, error) {
 	lastBlock, err := redis.GetClient().HGet(ctx, "last_blocks", sol.NetworkCode)
 	var lastBlockNumber uint64
 	if err != nil || lastBlock == "" {
-		lastBlockNumber = currentBlockNum - 10
+		lastBlockNumber = currentBlockNum - 1
 		log.Printf("[%s] First run, starting from block %d (current: %d)",
 			sol.NetworkCode, lastBlockNumber, currentBlockNum)
 	} else {
@@ -303,6 +310,15 @@ func (sol *Solana) GetInboundTransactions() ([]*InboundTransaction, error) {
 	if err != nil {
 		return nil, fmt.Errorf("[%s] Failed to get wallet address list: %w", sol.NetworkCode, err)
 	}
+	// Convert to map[PublicKey]userId for fast search
+	addressMap := make(map[solana.PublicKey]uint, len(addressList))
+	for addr, userId := range addressList {
+		pubKey, err := solana.PublicKeyFromBase58(addr)
+		if err != nil {
+			continue
+		}
+		addressMap[pubKey] = userId
+	}
 
 	// Get SOL decimals from config
 	solDecimals, err := config.GetChainSetting[int](
@@ -313,299 +329,278 @@ func (sol *Solana) GetInboundTransactions() ([]*InboundTransaction, error) {
 		return nil, fmt.Errorf("[%s] Failed to get SOL decimals from config: %w", sol.NetworkCode, err)
 	}
 
-	// Wait group to wait for all address goroutines to complete
-	var wg sync.WaitGroup
-	// Mutex for collecting results
-	var resultMu sync.Mutex
-	// Collect all transactions
-	allTxList := make([]*InboundTransaction, 0)
-
-	log.Printf("[%s] Processing transactions for %d addresses from block %d to %d",
-		sol.NetworkCode, len(addressList), lastBlockNumber, currentBlockNum)
-
-	// Process each address from list
-	for address, userId := range addressList {
-		wg.Add(1)
-
-		go func() {
-			defer wg.Done()
-
-			// Parse address
-			publicKey, err := solana.PublicKeyFromBase58(address)
-			if err != nil {
-				log.Printf("[%s] Failed to parse address '%s': %v", sol.NetworkCode, address, err)
-				return
-			}
-
-			// Get signatures for address
-			signatures, err := sol.Client.GetSignaturesForAddress(ctx, publicKey)
-			if err != nil {
-				log.Printf("[%s] Failed to get signatures for address '%s': %v", sol.NetworkCode, address, err)
-				return
-			}
-
-			log.Printf("[%s] Processing %d signatures for address '%s'",
-				sol.NetworkCode, len(signatures), address)
-
-			localTxList := make([]*InboundTransaction, 0)
-
-			// Process signatures
-			for _, sig := range signatures {
-				// Skip if signature slot is before our last processed slot
-				if sig.Slot <= lastBlockNumber {
-					continue
-				}
-				// Skip if signature slot is after current slot
-				if sig.Slot > currentBlockNum {
-					continue
-				}
-				// Skip failed transactions
-				if sig.Err != nil {
-					continue
-				}
-
-				// Get full transaction
-				tx, err := sol.Client.GetTransaction(ctx, sig.Signature, &rpc.GetTransactionOpts{
-					Encoding:   solana.EncodingBase64,
-					Commitment: rpc.CommitmentFinalized,
-				})
-				if err != nil {
-					log.Printf("[%s] Failed to get transaction '%s': %v",
-						sol.NetworkCode, sig.Signature, err)
-					continue
-				}
-				// Skip if transaction is nil
-				if tx == nil || tx.Transaction == nil {
-					continue
-				}
-
-				txHash := sig.Signature.String()
-
-				// Parse transaction
-				parsedTx, err := tx.Transaction.GetTransaction()
-				if err != nil {
-					log.Printf("[%s] Failed to parse transaction '%s': %v", sol.NetworkCode, txHash, err)
-					continue
-				}
-
-				// Get message
-				msg := parsedTx.Message
-
-				// Process all instructions in transaction
-				for _, instruction := range msg.Instructions {
-					// Get program id
-					programId := msg.AccountKeys[instruction.ProgramIDIndex]
-
-					// Check if it's native SOL transfer
-					if programId.Equals(solana.SystemProgramID) {
-						// Check if it's system transfer instruction (type 2)
-						if len(instruction.Data) > 0 && instruction.Data[0] == 2 {
-							// Get transfer accounts ([source, destination, owner])
-							if len(instruction.Accounts) < 2 {
-								log.Printf("[%s] Failed to get transfer accounts data for tx '%s': %v",
-									sol.NetworkCode, txHash, err)
-								continue
-							}
-							fromIdx := instruction.Accounts[0]
-							toIdx := instruction.Accounts[1]
-
-							// Get from and to address
-							fromAddr := msg.AccountKeys[fromIdx].String()
-							toAddr := msg.AccountKeys[toIdx].String()
-
-							// Check if receiver is our address
-							if toAddr == address {
-								// Decode amount (bytes 1-9 are lamports as little-endian uint64)
-								if len(instruction.Data) < 9 {
-									log.Printf("[%s] Failed to decode amount for tx '%s': %v",
-										sol.NetworkCode, txHash, err)
-									continue
-								}
-
-								// Parse lamports (uint64 little-endian)
-								lamports := uint64(instruction.Data[1]) |
-									uint64(instruction.Data[2])<<8 |
-									uint64(instruction.Data[3])<<16 |
-									uint64(instruction.Data[4])<<24 |
-									uint64(instruction.Data[5])<<32 |
-									uint64(instruction.Data[6])<<40 |
-									uint64(instruction.Data[7])<<48 |
-									uint64(instruction.Data[8])<<56
-
-								// Get converted amount (in SOL)
-								amount := utils.RemoveDecimals(big.NewInt(int64(lamports)), int64(solDecimals))
-
-								localTxList = append(localTxList, &InboundTransaction{
-									UserId:   int(userId),
-									Currency: "SOL",
-									TxId:     txHash,
-									From:     fromAddr,
-									To:       toAddr,
-									Amount:   amount,
-								})
-							}
-						}
-					}
-
-					// Check if it's SPL token transfer
-					if programId.Equals(solana.TokenProgramID) {
-						// Check, if it's transfer instruction (type 3)
-						if len(instruction.Data) > 0 && instruction.Data[0] == 3 {
-							// Get transfer accounts ([source, destination, owner])
-							if len(instruction.Accounts) < 2 {
-								log.Printf("[%s] Failed to get transfer accounts data for tx '%s': %v",
-									sol.NetworkCode, txHash, err)
-								continue
-							}
-
-							sourceIdx := instruction.Accounts[0]
-							destIdx := instruction.Accounts[1]
-
-							// Get destination token account info
-							destTokenAccount, err := sol.Client.GetAccountInfo(ctx, msg.AccountKeys[destIdx])
-							if err != nil || destTokenAccount == nil || destTokenAccount.Value == nil {
-								log.Printf("[%s] Failed to get account info for tx '%s': %v",
-									sol.NetworkCode, txHash, err)
-								continue
-							}
-
-							// Parse token account data
-							var destTokenData token.Account
-							decoder := bin.NewBinDecoder(destTokenAccount.Value.Data.GetBinary())
-							err = destTokenData.UnmarshalWithDecoder(decoder)
-							if err != nil {
-								log.Printf("[%s] Failed to unmarshal destination token data for tx '%s': %v",
-									sol.NetworkCode, txHash, err)
-								continue
-							}
-
-							// Get to address
-							toAddr := destTokenData.Owner.String()
-
-							// Check if to address equals current address from list
-							if toAddr == address {
-								// Parse amount (bytes 1-9 are amount as little-endian uint64)
-								if len(instruction.Data) < 9 {
-									continue
-								}
-
-								tokenAmount := uint64(instruction.Data[1]) |
-									uint64(instruction.Data[2])<<8 |
-									uint64(instruction.Data[3])<<16 |
-									uint64(instruction.Data[4])<<24 |
-									uint64(instruction.Data[5])<<32 |
-									uint64(instruction.Data[6])<<40 |
-									uint64(instruction.Data[7])<<48 |
-									uint64(instruction.Data[8])<<56
-
-								// Get mint address (token contract address)
-								contractAddr := destTokenData.Mint.String()
-
-								// Get token symbol from config
-								tokenSymbol, err := config.GetTokenByContractAddr(sol.NetworkCode, contractAddr)
-								if err != nil {
-									log.Printf("[%s] Unknown token contract address '%s'", sol.NetworkCode, contractAddr)
-									continue
-								}
-
-								// Get contract decimals from cache or fetch from contract
-								sol.decimalsCacheMu.RLock()
-								cached, exists := sol.decimalsCache[contractAddr]
-								sol.decimalsCacheMu.RUnlock()
-
-								var decimalsValue int64
-								if exists {
-									// Get contract decimals from cache
-									decimalsValue = cached
-								} else {
-									// Get contract info
-									mintPubKey, _ := solana.PublicKeyFromBase58(contractAddr)
-									mintAccount, err := sol.Client.GetAccountInfo(ctx, mintPubKey)
-									if err != nil || mintAccount == nil || mintAccount.Value == nil {
-										log.Printf("[%s] Failed to get contract info for '%s': %v",
-											sol.NetworkCode, contractAddr, err)
-										continue
-									}
-
-									// Parse contract data
-									var mintData token.Mint
-									mintDecoder := bin.NewBinDecoder(mintAccount.Value.Data.GetBinary())
-									err = mintData.UnmarshalWithDecoder(mintDecoder)
-									if err != nil {
-										log.Printf("[%s] Failed to parse mint data for '%s': %v",
-											sol.NetworkCode, contractAddr, err)
-										continue
-									}
-
-									decimalsValue = int64(mintData.Decimals)
-
-									// Save decimals to cache
-									sol.decimalsCacheMu.Lock()
-									sol.decimalsCache[contractAddr] = decimalsValue
-									sol.decimalsCacheMu.Unlock()
-								}
-
-								// Get converted amount
-								convertedAmount := utils.RemoveDecimals(big.NewInt(int64(tokenAmount)), decimalsValue)
-
-								// Get sender token account info
-								sourceTokenAccount, err := sol.Client.GetAccountInfo(ctx, msg.AccountKeys[sourceIdx])
-								if err != nil || sourceTokenAccount == nil || sourceTokenAccount.Value == nil {
-									log.Printf("[%s] Failed to get sender token account info for tx '%s': %v",
-										sol.NetworkCode, txHash, err)
-									continue
-								}
-
-								// Parse token account data
-								var sourceTokenData token.Account
-								sourceDecoder := bin.NewBinDecoder(sourceTokenAccount.Value.Data.GetBinary())
-								err = sourceTokenData.UnmarshalWithDecoder(sourceDecoder)
-								if err != nil {
-									log.Printf("[%s] Failed to unmarshal sender token account data for tx '%s': %v",
-										sol.NetworkCode, txHash, err)
-									continue
-								}
-
-								// Get from address
-								fromAddr := sourceTokenData.Owner.String()
-
-								localTxList = append(localTxList, &InboundTransaction{
-									UserId:   int(userId),
-									Currency: tokenSymbol,
-									TxId:     txHash,
-									From:     fromAddr,
-									To:       address,
-									Amount:   convertedAmount,
-								})
-							}
-						}
-					}
-				}
-			}
-
-			// Add to global result
-			if len(localTxList) > 0 {
-				resultMu.Lock()
-				allTxList = append(allTxList, localTxList...)
-				resultMu.Unlock()
-			}
-		}()
+	// Get all new blocks list
+	if err := limiter.Wait(ctx); err != nil {
+		return nil, err
+	}
+	blocks, err := sol.Client.GetBlocks(ctx, lastBlockNumber+1, &currentBlockNum, rpc.CommitmentFinalized)
+	if err != nil {
+		return nil, fmt.Errorf("[%s] failed to get blocks: %w", sol.NetworkCode, err)
+	}
+	if len(blocks) == 0 {
+		return []*InboundTransaction{}, nil
 	}
 
-	// Wait for all goroutines
-	wg.Wait()
+	log.Printf("[%s] Processing transactions for %d user addresses from block %d to %d",
+		sol.NetworkCode, len(addressList), lastBlockNumber+1, currentBlockNum)
 
-	// Save current block as last processed
-	if currentBlockNum > lastBlockNumber {
-		err = redis.GetClient().HSet(ctx, "last_blocks", sol.NetworkCode, currentBlockNum)
+	// Transaction list for all blocks
+	txList := make([]*InboundTransaction, 0)
+	// Flag for getting versioned transactions
+	version := uint64(0)
+
+	// Process all new blocks
+	for _, slot := range blocks {
+		// Get block entity
+		if err := limiter.Wait(ctx); err != nil {
+			return nil, err
+		}
+		block, err := sol.Client.GetBlockWithOpts(ctx, slot, &rpc.GetBlockOpts{
+			Encoding:                       solana.EncodingBase64,
+			Commitment:                     rpc.CommitmentFinalized,
+			TransactionDetails:             rpc.TransactionDetailsFull,
+			MaxSupportedTransactionVersion: &version,
+		})
 		if err != nil {
-			return nil, fmt.Errorf("[%s] Failed to save last block in Redis: %w", sol.NetworkCode, err)
+			return nil, fmt.Errorf("[%s] failed to get block %d: %w", sol.NetworkCode, slot, err)
+		}
+
+		// Process transactions in block
+		for _, tx := range block.Transactions {
+			// Skip, if transaction failed
+			if tx.Meta != nil && tx.Meta.Err != nil {
+				continue
+			}
+
+			// Get parsed transaction entity
+			parsedTx, err := tx.GetTransaction()
+			if err != nil {
+				log.Printf("[%s] Failed to get transaction in block %d: %v", sol.NetworkCode, block.BlockHeight, err)
+				continue
+			}
+			// Get transaction message
+			msg := parsedTx.Message
+
+			// Check, if transaction has any of user addresses (by public key)
+			hasOurAddress := false
+			for _, key := range msg.AccountKeys {
+				if _, ok := addressMap[key]; ok {
+					hasOurAddress = true
+					break
+				}
+			}
+			if !hasOurAddress {
+				continue
+			}
+
+			// Get transaction hash
+			txHash := parsedTx.Signatures[0].String()
+
+			// Process all instructions in transaction
+			for _, instruction := range msg.Instructions {
+				if int(instruction.ProgramIDIndex) >= len(msg.AccountKeys) {
+					continue
+				}
+				// Get program id
+				programId := msg.AccountKeys[instruction.ProgramIDIndex]
+
+				switch true {
+				// If it's native SOL transfer
+				case programId.Equals(solana.SystemProgramID):
+					// Check data format
+					if len(instruction.Data) < 12 {
+						continue
+					}
+					if binary.LittleEndian.Uint32(instruction.Data[0:4]) != 2 {
+						continue
+					}
+					if len(instruction.Accounts) < 2 {
+						continue
+					}
+
+					// Extract accounts data
+					toIdx := instruction.Accounts[1]
+					if int(toIdx) >= len(msg.AccountKeys) {
+						continue
+					}
+
+					// Get user id from address map (by public key)
+					toPubKey := msg.AccountKeys[toIdx]
+					userId, ok := addressMap[toPubKey]
+					if !ok {
+						continue
+					}
+
+					// Get from address
+					fromIdx := instruction.Accounts[0]
+					fromAddr := msg.AccountKeys[fromIdx].String()
+					// Get converted amount (in SOL)
+					rawAmount := binary.LittleEndian.Uint64(instruction.Data[4:12])
+					amount := utils.RemoveDecimals(big.NewInt(int64(rawAmount)), int64(solDecimals))
+
+					txList = append(txList, &InboundTransaction{
+						UserId:   int(userId),
+						Currency: "SOL",
+						TxId:     txHash,
+						From:     fromAddr,
+						To:       toPubKey.String(),
+						Amount:   amount,
+					})
+
+				// If it's SPL token transfer
+				case programId.Equals(solana.TokenProgramID):
+					// Check instruction type
+					if len(instruction.Data) < 9 {
+						continue
+					}
+
+					instructionType := instruction.Data[0]
+					if instructionType != 3 && instructionType != 12 {
+						continue
+					}
+					if len(instruction.Accounts) < 2 {
+						continue
+					}
+
+					// Get receiver key
+					destIdx := instruction.Accounts[1]
+					if int(destIdx) >= len(msg.AccountKeys) {
+						continue
+					}
+					destTokenAccountKey := msg.AccountKeys[destIdx]
+
+					// Trying to search receiver (owner) in PostTokenBalances
+					var ownerPubKey solana.PublicKey
+					var mintAddr string
+					var found bool
+					if tx.Meta != nil {
+						for _, balance := range tx.Meta.PostTokenBalances {
+							if balance.AccountIndex == destIdx && balance.Owner != nil {
+								ownerPubKey = *balance.Owner
+								mintAddr = balance.Mint.String()
+								found = true
+								break
+							}
+						}
+					}
+					// Fallback to RPC, if receiver not found in metadata
+					if !found {
+						if err := limiter.Wait(ctx); err != nil {
+							return nil, err
+						}
+
+						// Get account info
+						destAccountInfo, err := sol.Client.GetAccountInfo(ctx, destTokenAccountKey)
+						if err != nil || destAccountInfo == nil || destAccountInfo.Value == nil {
+							continue
+						}
+
+						// Parse token account data
+						var destTokenData token.Account
+						if err := bin.NewBinDecoder(destAccountInfo.Value.Data.GetBinary()).Decode(&destTokenData); err != nil {
+							continue
+						}
+
+						ownerPubKey = destTokenData.Owner
+						mintAddr = destTokenData.Mint.String()
+					}
+
+					// Get user id from address map (by receiver public key)
+					userId, ok := addressMap[ownerPubKey]
+					if !ok {
+						continue
+					}
+
+					// Get token symbol from config
+					tokenSymbol, err := config.GetTokenByContractAddr(sol.NetworkCode, mintAddr)
+					if err != nil {
+						continue
+					}
+
+					// Trying to get contract decimals from cache
+					sol.decimalsCacheMu.RLock()
+					decimalsValue, exists := sol.decimalsCache[mintAddr]
+					sol.decimalsCacheMu.RUnlock()
+					// Fetch data from contract
+					if !exists {
+						if err := limiter.Wait(ctx); err != nil {
+							return nil, err
+						}
+
+						// Get contract data
+						mintPubKey, _ := solana.PublicKeyFromBase58(mintAddr)
+						mintAccount, err := sol.Client.GetAccountInfo(ctx, mintPubKey)
+						if err != nil || mintAccount == nil || mintAccount.Value == nil {
+							continue
+						}
+
+						// Parse contract data
+						var mintData token.Mint
+						if err := bin.NewBinDecoder(mintAccount.Value.Data.GetBinary()).Decode(&mintData); err != nil {
+							continue
+						}
+						decimalsValue = int64(mintData.Decimals)
+
+						// Save decimals to cache
+						sol.decimalsCacheMu.Lock()
+						sol.decimalsCache[mintAddr] = decimalsValue
+						sol.decimalsCacheMu.Unlock()
+					}
+
+					// Get from address
+					fromAddr := ""
+					sourceIdx := instruction.Accounts[0]
+					// Try to found in PreTokenBalances
+					if tx.Meta != nil {
+						for _, balance := range tx.Meta.PreTokenBalances {
+							if balance.AccountIndex == sourceIdx && balance.Owner != nil {
+								fromAddr = balance.Owner.String()
+								break
+							}
+						}
+					}
+					// Fallback to RPC, if sender not found in metadata
+					if fromAddr == "" && int(sourceIdx) < len(msg.AccountKeys) {
+						if err := limiter.Wait(ctx); err != nil {
+							return nil, err
+						}
+
+						// Get sender token account info
+						sourceAccountInfo, err := sol.Client.GetAccountInfo(ctx, msg.AccountKeys[sourceIdx])
+						if err == nil && sourceAccountInfo != nil && sourceAccountInfo.Value != nil {
+							var sourceTokenData token.Account
+							// Parse token account data
+							if err := bin.NewBinDecoder(sourceAccountInfo.Value.Data.GetBinary()).Decode(&sourceTokenData); err == nil {
+								fromAddr = sourceTokenData.Owner.String()
+							}
+						}
+					}
+
+					// Get converted amount
+					tokenAmount := binary.LittleEndian.Uint64(instruction.Data[1:9])
+					amount := utils.RemoveDecimals(big.NewInt(int64(tokenAmount)), decimalsValue)
+
+					txList = append(txList, &InboundTransaction{
+						UserId:   int(userId),
+						Currency: tokenSymbol,
+						TxId:     txHash,
+						From:     fromAddr,
+						To:       ownerPubKey.String(),
+						Amount:   amount,
+					})
+				}
+			}
 		}
 	}
 
-	log.Printf("[%s] Processed %d transactions successful", sol.NetworkCode, len(allTxList))
+	// Save last processed block to Redis
+	err = redis.GetClient().HSet(ctx, "last_blocks", sol.NetworkCode, currentBlockNum)
+	if err != nil {
+		return nil, fmt.Errorf("[%s] Failed to save block %d to Redis: %w", sol.NetworkCode, currentBlockNum, err)
+	}
 
-	return allTxList, nil
+	log.Printf("[%s] Processing finished successfully, found %d user transactions", sol.NetworkCode, len(txList))
+	return txList, nil
 }
 
 /* GetUserWallet private methods group */

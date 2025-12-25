@@ -3,6 +3,7 @@ package chains
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strconv"
@@ -45,7 +46,7 @@ type (
 		GetTransactionCommission(oType, wType string, wId *string, currency, to string, amount float64, memo string) (map[string]float64, error)
 		GetTransactionStatus(hash, toAddr string) (string, error)
 		SendTransaction(wType string, wId *string, currency, to string, amount float64, memo string) (string, error)
-		GetInboundTransactions() ([]*InboundTransaction, error)
+		GetInboundTransactions(ctx context.Context) ([]*InboundTransaction, error)
 	}
 )
 
@@ -59,6 +60,8 @@ func ProcessInboundTransactions(ctx context.Context) error {
 
 	// Wait group to wait for all network goroutines to complete
 	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var errorsList []error
 
 	// Get all networks list
 	networks := GetAvailableNetworks()
@@ -78,29 +81,24 @@ func ProcessInboundTransactions(ctx context.Context) error {
 			defer wg.Done()
 
 			// Get inbound transactions list
-			txList, err := chainService.GetInboundTransactions()
+			txList, err := chainService.GetInboundTransactions(ctx)
 			if err != nil {
 				log.Printf("[ProcessInboundTransactions] [%s] Failed to get transactions list: %v", network, err)
+
+				mu.Lock()
+				errorsList = append(errorsList, fmt.Errorf("[%s] %w", network, err))
+				mu.Unlock()
+
 				return
 			}
-			if len(txList) == 0 {
-				log.Printf("[ProcessInboundTransactions] [%s] No transactions found", network)
-			}
 
-			// Timeout for network processing (60 seconds for all transactions)
-			netCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
-			defer cancel()
+			if len(txList) > 0 {
+				log.Printf("[ProcessInboundTransactions] [%s] Start processing [%d] user transactions",
+					network, len(txList))
+			}
 
 			// Process inbound transactions list
 			for _, tx := range txList {
-				// Check context for cancellation
-				select {
-				case <-netCtx.Done():
-					log.Printf("[ProcessInboundTransactions] [%s] Context cancelled: %v", network, netCtx.Err())
-					return
-				default:
-				}
-
 				// Refill transaction AML check
 				amlId, err := aml.GetClient().CheckTransaction(network, tx.Currency, tx.TxId, tx.To, "incoming")
 				if err != nil {
@@ -110,7 +108,9 @@ func ProcessInboundTransactions(ctx context.Context) error {
 				}
 
 				// Transfer tokens from user wallet to master wallet and return transfer fee (in native network token)
-				transferFeeAmount, err := TransferTokensToMasterWallet(netCtx, chainService, strconv.Itoa(tx.UserId), tx.Currency, tx.To, tx.Amount)
+				transferFeeAmount, err := TransferTokensToMasterWallet(
+					ctx, chainService, strconv.Itoa(tx.UserId), tx.Currency, tx.To, tx.Amount,
+				)
 				if err != nil {
 					log.Printf("[ProcessInboundTransactions] [%s] Failed to transfer tokens to master wallet: %v",
 						network, err)
@@ -151,6 +151,9 @@ func ProcessInboundTransactions(ctx context.Context) error {
 	// Waiting for all network goroutines
 	wg.Wait()
 
+	if len(errorsList) > 0 {
+		return errors.Join(errorsList...)
+	}
 	return nil
 }
 

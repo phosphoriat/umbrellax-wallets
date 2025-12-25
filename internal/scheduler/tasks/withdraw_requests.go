@@ -27,7 +27,7 @@ func NewWithdrawRequestsTask() *WithdrawRequestTask {
 	return &WithdrawRequestTask{
 		BaseTask: BaseTask{
 			maxRetries:  3,
-			timeout:     10 * time.Second,
+			timeout:     30 * time.Second,
 			name:        "withdraw_requests",
 			description: "Process withdraw requests",
 		},
@@ -41,10 +41,9 @@ func NewWithdrawRequestsTask() *WithdrawRequestTask {
 
 func (t *WithdrawRequestTask) Execute(ctx context.Context) error {
 	// Get first item from hash
-	key, value, err := redis.GetClient().GetFirstHashElement(ctx, t.RedisBybitReqsKey)
+	key, value, err := t.redis.GetFirstHashElement(ctx, t.RedisBybitReqsKey)
 	if err != nil {
-		log.Printf("Read hash error '%s': %v", t.RedisBybitReqsKey, err)
-		return nil
+		return fmt.Errorf("read hash error '%s': %w", t.RedisBybitReqsKey, err)
 	}
 	if key == "" {
 		return nil
@@ -53,13 +52,13 @@ func (t *WithdrawRequestTask) Execute(ctx context.Context) error {
 	// Process first item from hash
 	err = t.processItem(ctx, key, value)
 	if err != nil {
-		log.Printf("Process item error: %v", err)
-
 		// Add item in withdrawals Redis hash with failed status
 		txItem, _ := json.Marshal(map[string]any{
 			"status": "failed",
 		})
 		t.redis.HSet(ctx, t.RedisWithdrawalsKey, key, txItem)
+
+		log.Printf("Process item error: %v", err)
 	}
 
 	// Delete item from bybit requests Redis hash

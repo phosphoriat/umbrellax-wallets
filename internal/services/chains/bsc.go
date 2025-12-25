@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-
 	"wallets/internal/config"
 	"wallets/internal/database/redis"
 	"wallets/internal/database/vault"
@@ -27,12 +26,15 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/ethereum/go-ethereum/rpc"
+	"golang.org/x/time/rate"
 )
 
 // Bsc RPC connection struct
 type Bsc struct {
 	BaseChainService
 	Client          *ethclient.Client
+	RateLimit       int
 	decimalsCache   map[string]int64
 	decimalsCacheMu sync.RWMutex
 }
@@ -57,7 +59,7 @@ func newBsc() *Bsc {
 	cfg, _ := config.Load()
 
 	// Create new RPC client
-	bscClient, err := ethclient.Dial(cfg.BscRpcUrl)
+	bscClient, err := ethclient.Dial(cfg.BscRpcUrl + "/" + cfg.QuickNodeApiKey)
 	if err != nil {
 		log.Printf("[BSC] Failed to connect to RPC API: %v", err)
 	}
@@ -258,10 +260,14 @@ func (bsc *Bsc) SendTransaction(wType string, wId *string, currency, toAddr stri
 }
 
 // GetInboundTransactions Get new inbound transactions list
-func (bsc *Bsc) GetInboundTransactions() ([]*InboundTransaction, error) {
-	ctx := context.Background()
+func (bsc *Bsc) GetInboundTransactions(ctx context.Context) ([]*InboundTransaction, error) {
+	// Create rate limiter
+	limiter := rate.NewLimiter(rate.Limit(bsc.RateLimit), 1)
 
 	// Get current block number
+	if err := limiter.Wait(ctx); err != nil {
+		return nil, err
+	}
 	currentBlockNum, err := bsc.Client.BlockNumber(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("[%s] Failed to get current block number: %w", bsc.NetworkCode, err)
@@ -271,7 +277,7 @@ func (bsc *Bsc) GetInboundTransactions() ([]*InboundTransaction, error) {
 	lastBlock, err := redis.GetClient().HGet(ctx, "last_blocks", bsc.NetworkCode)
 	var lastBlockNumber uint64
 	if err != nil || lastBlock == "" {
-		lastBlockNumber = currentBlockNum - 10
+		lastBlockNumber = currentBlockNum - 1
 		log.Printf("[%s] First run, starting from block %d (current: %d)",
 			bsc.NetworkCode, lastBlockNumber, currentBlockNum)
 	} else {
@@ -292,6 +298,9 @@ func (bsc *Bsc) GetInboundTransactions() ([]*InboundTransaction, error) {
 	}
 
 	// Get current chain id
+	if err := limiter.Wait(ctx); err != nil {
+		return nil, err
+	}
 	chainID, err := bsc.Client.ChainID(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("[%s] Failed to get chain ID: %w", bsc.NetworkCode, err)
@@ -319,199 +328,157 @@ func (bsc *Bsc) GetInboundTransactions() ([]*InboundTransaction, error) {
 		return nil, fmt.Errorf("[%s] Failed to parse BEP20 ABI from config: %w", bsc.NetworkCode, err)
 	}
 
-	// Wait group to wait for all tx blocks goroutines to complete
-	var wg sync.WaitGroup
-	// Concurrent save map for successfully processed blocks
-	successfulBlocks := &sync.Map{}
-	// Channel for collect transactions from all blocks
-	resultChan := make(chan []*InboundTransaction, currentBlockNum-lastBlockNumber)
+	log.Printf("[%s] Processing %d blocks from %d to %d",
+		bsc.NetworkCode, currentBlockNum-lastBlockNumber, lastBlockNumber+1, currentBlockNum)
 
-	log.Printf("[%s] Processing blocks %d to %d", bsc.NetworkCode, lastBlockNumber+1, currentBlockNum)
+	// Transaction list for all blocks
+	txList := make([]*InboundTransaction, 0)
 
-	// Check all new blocks
+	// Process all new blocks
 	for blockNum := lastBlockNumber + 1; blockNum <= currentBlockNum; blockNum++ {
-		wg.Add(1)
+		// Get block entity by number
+		if err := limiter.Wait(ctx); err != nil {
+			return nil, err
+		}
+		block, err := bsc.Client.BlockByNumber(ctx, big.NewInt(int64(blockNum)))
+		if err != nil {
+			return nil, fmt.Errorf("[%s] Failed to get block %d: %w", bsc.NetworkCode, blockNum, err)
+		}
 
-		go func() {
-			defer wg.Done()
+		// Get all block receipts (for check status)
+		if err := limiter.Wait(ctx); err != nil {
+			return nil, err
+		}
+		blockReceipts, err := bsc.Client.BlockReceipts(ctx, rpc.BlockNumberOrHashWithHash(block.Hash(), true))
+		if err != nil {
+			return nil, fmt.Errorf("[%s] Failed to get block receipts: %w", bsc.NetworkCode, err)
+		}
 
-			// Get block entity by number
-			block, err := bsc.Client.BlockByNumber(ctx, big.NewInt(int64(blockNum)))
-			if err != nil {
-				log.Printf("[%s] Failed to get block %d: %v", bsc.NetworkCode, blockNum, err)
-				resultChan <- []*InboundTransaction{}
-				return
+		log.Printf("[%s] Processing block %d with %d transactions",
+			bsc.NetworkCode, blockNum, len(block.Transactions()))
+
+		// Process transactions in block
+		for index, tx := range block.Transactions() {
+			// Get tx hash
+			txHash := tx.Hash().Hex()
+			// Skip, if transaction is not success
+			if blockReceipts[index].Status != types.ReceiptStatusSuccessful {
+				continue
 			}
 
-			log.Printf("[%s] Processing block %d with %d transactions",
-				bsc.NetworkCode, blockNum, len(block.Transactions()))
+			switch true {
+			// Check if it's a native BNB transfer
+			case tx.To() != nil && tx.Value().Cmp(big.NewInt(0)) > 0:
+				toAddr := strings.ToLower(tx.To().Hex())
 
-			// Local goroutine tx list (one for every block)
-			localTxList := make([]*InboundTransaction, 0)
+				// Check if address exists in network addresses list
+				if userId, ok := addressList[toAddr]; ok {
+					// Get sender address
+					from, err := types.Sender(types.LatestSignerForChainID(chainID), tx)
+					if err != nil {
+						log.Printf("[%s] Failed to get sender for tx '%s': %v", bsc.NetworkCode, txHash, err)
+						continue
+					}
 
-			// Process transactions in block
-			for _, tx := range block.Transactions() {
-				// Get transaction receipt to check status
-				receipt, err := bsc.Client.TransactionReceipt(ctx, tx.Hash())
-				if err != nil {
-					log.Printf("[%s] Failed to get transaction receipt for '%s': %v",
-						bsc.NetworkCode, tx.Hash().Hex(), err)
-					continue
+					// Get converted amount (in BNB)
+					amount := utils.RemoveDecimals(tx.Value(), int64(bnbDecimals))
+
+					txList = append(txList, &InboundTransaction{
+						UserId:   int(userId),
+						Currency: "BNB",
+						TxId:     txHash,
+						From:     from.Hex(),
+						To:       tx.To().Hex(),
+						Amount:   amount,
+					})
 				}
 
-				txHash := tx.Hash().Hex()
+			// Check if it's an BEP20 token transfer
+			// Data structure: 4 bytes method ID + 32 bytes address + 32 bytes amount
+			case tx.To() != nil && len(tx.Data()) >= 68:
+				// Check if method is transfer (a9059cbb)
+				methodId := fmt.Sprintf("%x", tx.Data()[0:4])
+				if methodId == "a9059cbb" {
+					// Get contract address
+					contractAddr := strings.ToLower(tx.To().Hex())
 
-				// Check if transaction was successful (status = 1)
-				if receipt.Status != types.ReceiptStatusSuccessful {
-					log.Printf("[%s] Transaction '%s' failed with status %d",
-						bsc.NetworkCode, txHash, receipt.Status)
-					continue
-				}
+					// Get token name by contract address
+					token, err := config.GetTokenByContractAddr(bsc.NetworkCode, contractAddr)
+					if err != nil {
+						continue
+					}
 
-				// Check if it's a native BNB transfer
-				if tx.To() != nil && tx.Value().Cmp(big.NewInt(0)) > 0 {
-					toAddr := strings.ToLower(tx.To().Hex())
+					// Extract to address (bytes 4-36, take last 20 bytes)
+					toAddrBytes := tx.Data()[16:36]
+					toAddr := strings.ToLower(common.BytesToAddress(toAddrBytes).Hex())
 
 					// Check if address exists in network addresses list
 					if userId, ok := addressList[toAddr]; ok {
+						// Trying to get contract decimals from cache
+						bsc.decimalsCacheMu.RLock()
+						decimalsValue, exists := bsc.decimalsCache[contractAddr]
+						bsc.decimalsCacheMu.RUnlock()
+						// Fetch from contract
+						if !exists {
+							if err := limiter.Wait(ctx); err != nil {
+								return nil, err
+							}
+
+							// Get contract instance from ABI
+							var out []interface{}
+							contract := bind.NewBoundContract(
+								common.HexToAddress(contractAddr), parsedAbi, bsc.Client, bsc.Client, bsc.Client,
+							)
+
+							// Fetch decimals from contract
+							err = contract.Call(&bind.CallOpts{}, &out, "decimals")
+							if err != nil {
+								log.Printf("[%s] Failed to get contract decimals for '%s': %v",
+									bsc.NetworkCode, contractAddr, err)
+								continue
+							}
+							decimalsValue = *abi.ConvertType(out[0], new(int64)).(*int64)
+
+							// Save decimals to cache
+							bsc.decimalsCacheMu.Lock()
+							bsc.decimalsCache[contractAddr] = decimalsValue
+							bsc.decimalsCacheMu.Unlock()
+						}
+
 						// Get sender address
 						from, err := types.Sender(types.LatestSignerForChainID(chainID), tx)
 						if err != nil {
-							log.Printf("[%s] Failed to get sender for tx '%s': %v", bsc.NetworkCode, txHash, err)
+							log.Printf("[%s] Failed to get sender for tx '%s': %v",
+								bsc.NetworkCode, txHash, err)
 							continue
 						}
 
-						// Get converted amount (in BNB)
-						amount := utils.RemoveDecimals(tx.Value(), int64(bnbDecimals))
+						// Extract amount (bytes 36-68)
+						rawAmount := new(big.Int).SetBytes(tx.Data()[36:68])
+						// Get converted amount
+						amount := utils.RemoveDecimals(rawAmount, decimalsValue)
 
-						localTxList = append(localTxList, &InboundTransaction{
+						txList = append(txList, &InboundTransaction{
 							UserId:   int(userId),
-							Currency: "BNB",
+							Currency: token,
 							TxId:     txHash,
 							From:     from.Hex(),
-							To:       tx.To().Hex(),
+							To:       common.BytesToAddress(toAddrBytes).Hex(),
 							Amount:   amount,
 						})
 					}
 				}
-
-				// Check if it's an BEP20 token transfer
-				// Data structure: 4 bytes method ID + 32 bytes address + 32 bytes amount
-				if tx.To() != nil && len(tx.Data()) >= 68 {
-					// Check if method is transfer (a9059cbb)
-					methodId := fmt.Sprintf("%x", tx.Data()[0:4])
-					if methodId == "a9059cbb" {
-						// Get contract address
-						contractAddr := strings.ToLower(tx.To().Hex())
-
-						// Get token name by contract address
-						token, err := config.GetTokenByContractAddr(bsc.NetworkCode, contractAddr)
-						if err != nil {
-							continue
-						}
-
-						// Extract to address (bytes 4-36, take last 20 bytes)
-						toAddrBytes := tx.Data()[16:36]
-						toAddr := strings.ToLower(common.BytesToAddress(toAddrBytes).Hex())
-
-						// Check if address exists in network addresses list
-						if userId, ok := addressList[toAddr]; ok {
-							// Get contract decimals from cache or fetch from contract
-							bsc.decimalsCacheMu.RLock()
-							cached, exists := bsc.decimalsCache[contractAddr]
-							bsc.decimalsCacheMu.RUnlock()
-
-							var decimalsValue int64
-							if exists {
-								// Get contract decimals from cache
-								decimalsValue = cached
-							} else {
-								// Get contract instance from ABI
-								var out []interface{}
-								contract := bind.NewBoundContract(common.HexToAddress(contractAddr), parsedAbi, bsc.Client, bsc.Client, bsc.Client)
-
-								// Fetch decimals from contract
-								err = contract.Call(&bind.CallOpts{}, &out, "decimals")
-								if err != nil {
-									log.Printf("[%s] Failed to get contract decimals for '%s': %v",
-										bsc.NetworkCode, contractAddr, err)
-									continue
-								}
-								decimalsValue = *abi.ConvertType(out[0], new(int64)).(*int64)
-
-								// Save decimals to cache
-								bsc.decimalsCacheMu.Lock()
-								bsc.decimalsCache[contractAddr] = decimalsValue
-								bsc.decimalsCacheMu.Unlock()
-							}
-
-							// Get sender address
-							from, err := types.Sender(types.LatestSignerForChainID(chainID), tx)
-							if err != nil {
-								log.Printf("[%s] Failed to get sender for tx '%s': %v", bsc.NetworkCode, txHash, err)
-								continue
-							}
-
-							// Extract amount (bytes 36-68)
-							rawAmount := new(big.Int).SetBytes(tx.Data()[36:68])
-							// Get converted amount
-							amount := utils.RemoveDecimals(rawAmount, decimalsValue)
-
-							localTxList = append(localTxList, &InboundTransaction{
-								UserId:   int(userId),
-								Currency: token,
-								TxId:     txHash,
-								From:     from.Hex(),
-								To:       common.BytesToAddress(toAddrBytes).Hex(),
-								Amount:   amount,
-							})
-						}
-					}
-				}
 			}
-
-			// Mark the block as successfully processed
-			successfulBlocks.Store(blockNum, true)
-			// Send batch to result channel (one send for block)
-			resultChan <- localTxList
-		}()
-	}
-
-	// Waiting for results
-	go func() {
-		wg.Wait()
-		close(resultChan)
-	}()
-
-	// Collect results from batches
-	txList := make([]*InboundTransaction, 0)
-	for batch := range resultChan {
-		txList = append(txList, batch...)
-	}
-
-	// Get the last continuously successful block
-	// This ensures that we don't miss blocks the next time we run
-	lastContinuousBlock := lastBlockNumber
-	for blockNum := lastBlockNumber + 1; blockNum <= currentBlockNum; blockNum++ {
-		if _, ok := successfulBlocks.Load(blockNum); ok {
-			lastContinuousBlock = blockNum
-		} else {
-			// Stop, if found the first failed block
-			log.Printf("[%s] Block %d was not processed successfully, stopping at %d",
-				bsc.NetworkCode, blockNum, lastContinuousBlock)
-			break
 		}
-	}
 
-	// Save last processed block in Redis
-	if lastContinuousBlock > lastBlockNumber {
-		err = redis.GetClient().HSet(ctx, "last_blocks", bsc.NetworkCode, lastContinuousBlock)
+		// Save last processed block to Redis
+		err = redis.GetClient().HSet(ctx, "last_blocks", bsc.NetworkCode, blockNum)
 		if err != nil {
-			return nil, fmt.Errorf("[%s] Failed to save last block in Redis: %w", bsc.NetworkCode, err)
+			return nil, fmt.Errorf("[%s] Failed to save block %d to Redis: %w", bsc.NetworkCode, blockNum, err)
 		}
 	}
-	log.Printf("[%s] Processed %d transactions successful", bsc.NetworkCode, len(txList))
 
+	log.Printf("[%s] Processing finished successfully, found %d user transactions", bsc.NetworkCode, len(txList))
 	return txList, nil
 }
 

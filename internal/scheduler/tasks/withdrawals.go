@@ -28,7 +28,7 @@ func NewWithdrawalsTask() *WithdrawalsTask {
 	return &WithdrawalsTask{
 		BaseTask: BaseTask{
 			maxRetries:  3,
-			timeout:     10 * time.Second,
+			timeout:     30 * time.Second,
 			name:        "withdrawals",
 			description: "Process withdrawals",
 		},
@@ -43,8 +43,7 @@ func (t *WithdrawalsTask) Execute(ctx context.Context) error {
 	// Get all items from hash
 	values, err := t.redis.HGetAll(ctx, t.RedisBybitWithdrawalsKey)
 	if err != nil {
-		log.Printf("Withdrawals hash read error '%s': %v", t.RedisBybitWithdrawalsKey, err)
-		return nil
+		return fmt.Errorf("withdrawals hash read error '%s': %w", t.RedisBybitWithdrawalsKey, err)
 	}
 
 	// Process all items from hash
@@ -128,8 +127,7 @@ func (t *WithdrawalsTask) processItem(ctx context.Context, requestId, itemStr st
 		t.redis.HSet(ctx, t.RedisWithdrawalsKey, requestId, txItem)
 
 		return nil
-
-	} else {
-		return fmt.Errorf("bybit withdrawal tx status parse error: %w", err)
 	}
+
+	return fmt.Errorf("bybit withdrawal tx status parse error")
 }

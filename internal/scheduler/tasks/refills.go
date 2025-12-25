@@ -2,7 +2,6 @@ package tasks
 
 import (
 	"context"
-	"log"
 	"time"
 
 	"wallets/internal/services/chains"
@@ -15,8 +14,8 @@ type RefillsTask struct {
 func NewRefillsTask() *RefillsTask {
 	return &RefillsTask{
 		BaseTask: BaseTask{
-			maxRetries:  3,
-			timeout:     time.Second * 5,
+			maxRetries:  30,
+			timeout:     60 * time.Second,
 			name:        "refills",
 			description: "Process refills",
 		},
@@ -24,11 +23,5 @@ func NewRefillsTask() *RefillsTask {
 }
 
 func (t *RefillsTask) Execute(ctx context.Context) error {
-	err := chains.ProcessInboundTransactions(ctx)
-	if err != nil {
-		log.Printf("Processing inbound transactions error: %v", err)
-		return nil
-	}
-
-	return nil
+	return chains.ProcessInboundTransactions(ctx)
 }

@@ -28,11 +28,13 @@ import (
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
+	"golang.org/x/time/rate"
 )
 
 type Bitcoin struct {
 	BaseChainService
 	Client      *rpcclient.Client
+	RateLimit   int
 	ChainParams *chaincfg.Params
 }
 
@@ -63,7 +65,7 @@ func newBitcoin() *Bitcoin {
 	// Load config
 	cfg, _ := config.Load()
 
-	// Create RPC client with default options
+	// Create new RPC client (with local full node connection)
 	client, err := rpcclient.New(&rpcclient.ConnConfig{
 		Host:         cfg.BtcNodeUrl,
 		User:         cfg.BtcNodeUser,
@@ -425,10 +427,14 @@ func (btc *Bitcoin) SendTransaction(wType string, wId *string, currency, to stri
 }
 
 // GetInboundTransactions Get new inbound transactions list
-func (btc *Bitcoin) GetInboundTransactions() ([]*InboundTransaction, error) {
-	ctx := context.Background()
+func (btc *Bitcoin) GetInboundTransactions(ctx context.Context) ([]*InboundTransaction, error) {
+	// Create rate limiter
+	limiter := rate.NewLimiter(rate.Limit(btc.RateLimit), 1)
 
 	// Get current block height
+	if err := limiter.Wait(ctx); err != nil {
+		return nil, err
+	}
 	currentBlockHeight, err := btc.Client.GetBlockCount()
 	if err != nil {
 		return nil, fmt.Errorf("[%s] Failed to get current block height: %w", btc.NetworkCode, err)
@@ -438,7 +444,7 @@ func (btc *Bitcoin) GetInboundTransactions() ([]*InboundTransaction, error) {
 	lastBlockStr, err := redis.GetClient().HGet(ctx, "last_blocks", btc.NetworkCode)
 	var lastBlockHeight int64
 	if err != nil || lastBlockStr == "" {
-		lastBlockHeight = currentBlockHeight - 10
+		lastBlockHeight = currentBlockHeight - 1
 		log.Printf("[%s] First run, starting from block %d (current: %d)",
 			btc.NetworkCode, lastBlockHeight, currentBlockHeight)
 	} else {
@@ -466,169 +472,130 @@ func (btc *Bitcoin) GetInboundTransactions() ([]*InboundTransaction, error) {
 		return nil, fmt.Errorf("[%s] Failed to get BTC decimals from config: %w", btc.NetworkCode, err)
 	}
 
-	// Wait group to wait for all block goroutines to complete
-	var wg sync.WaitGroup
-	// Concurrent save map for successfully processed blocks
-	successfulBlocks := &sync.Map{}
-	// Channel for collect transactions from all blocks
-	resultChan := make(chan []*InboundTransaction, currentBlockHeight-lastBlockHeight)
+	log.Printf("[%s] Processing %d blocks from %d to %d",
+		btc.NetworkCode, currentBlockHeight-lastBlockHeight-1, lastBlockHeight+1, currentBlockHeight)
 
-	log.Printf("[%s] Processing blocks %d to %d", btc.NetworkCode, lastBlockHeight+1, currentBlockHeight)
+	// Transaction list for all blocks
+	txList := make([]*InboundTransaction, 0)
 
 	// Check all new blocks
 	for blockHeight := lastBlockHeight + 1; blockHeight <= currentBlockHeight; blockHeight++ {
-		wg.Add(1)
+		// Get block hash by height
+		if err := limiter.Wait(ctx); err != nil {
+			return nil, err
+		}
+		blockHash, err := btc.Client.GetBlockHash(blockHeight)
+		if err != nil {
+			return nil, fmt.Errorf("[%s] Failed to get block hash for height %d: %w", btc.NetworkCode, blockHeight, err)
+		}
 
-		go func() {
-			defer wg.Done()
+		// Get block by hash
+		if err := limiter.Wait(ctx); err != nil {
+			return nil, err
+		}
+		block, err := btc.Client.GetBlock(blockHash)
+		if err != nil {
+			return nil, fmt.Errorf("[%s] Failed to get block %d: %w", btc.NetworkCode, blockHeight, err)
+		}
 
-			// Get block hash by height
-			blockHash, err := btc.Client.GetBlockHash(blockHeight)
-			if err != nil {
-				log.Printf("[%s] Failed to get block hash for height %d: %v", btc.NetworkCode, blockHeight, err)
-				resultChan <- []*InboundTransaction{}
-				return
+		log.Printf("[%s] Processing block %d with %d transactions",
+			btc.NetworkCode, blockHeight, len(block.Transactions))
+
+		// Process transactions in block
+		for _, tx := range block.Transactions {
+			// Check if it's coinbase transaction and skip it (first tx in block with special input)
+			if len(tx.TxIn) == 1 && tx.TxIn[0].PreviousOutPoint.Index == 0xffffffff {
+				continue
 			}
 
-			// Get block by hash
-			block, err := btc.Client.GetBlock(blockHash)
-			if err != nil {
-				log.Printf("[%s] Failed to get block %d: %v", btc.NetworkCode, blockHeight, err)
-				resultChan <- []*InboundTransaction{}
-				return
-			}
+			// Get tx hash
+			txHash := tx.TxHash().String()
 
-			log.Printf("[%s] Processing block %d with %d transactions",
-				btc.NetworkCode, blockHeight, len(block.Transactions))
-
-			// Local goroutine tx list
-			localTxList := make([]*InboundTransaction, 0)
-
-			// Process transactions in block
-			for _, tx := range block.Transactions {
-				// Check if it's coinbase transaction and skip it (first tx in block with special input)
-				if len(tx.TxIn) == 1 && tx.TxIn[0].PreviousOutPoint.Index == 0xffffffff {
+			// Iterate all outputs in transaction
+			for _, vout := range tx.TxOut {
+				// Skip zero-value outputs
+				if vout.Value == 0 {
 					continue
 				}
 
-				// Get tx hash
-				txHash := tx.TxHash().String()
+				// Extract addresses from script
+				_, addresses, _, err := txscript.ExtractPkScriptAddrs(vout.PkScript, btc.ChainParams)
+				if err != nil {
+					continue
+				}
 
-				// Iterate all outputs in transaction
-				for _, vout := range tx.TxOut {
-					// Skip zero-value outputs
-					if vout.Value == 0 {
-						continue
-					}
+				// Iterate all addresses from transaction
+				for _, addr := range addresses {
+					addrStr := addr.String()
 
-					// Extract addresses from script
-					_, addresses, _, err := txscript.ExtractPkScriptAddrs(vout.PkScript, btc.ChainParams)
-					if err != nil {
-						continue
-					}
+					// Check if address exists in network addresses list
+					if userId, ok := addressList[addrStr]; ok {
+						// Get from address
+						var fromAddr string
 
-					// Iterate all addresses from transaction
-					for _, addr := range addresses {
-						addrStr := addr.String()
+						if len(tx.TxIn) > 0 {
+							// Get first input
+							txIn := tx.TxIn[0]
+							prevTxHash := txIn.PreviousOutPoint.Hash.String()
+							prevOutIndex := txIn.PreviousOutPoint.Index
 
-						// Check if address exists in network addresses list
-						if userId, ok := addressList[addrStr]; ok {
-							// Get from address
-							var fromAddr string
+							// Get previous transaction
+							if err := limiter.Wait(ctx); err != nil {
+								return nil, err
+							}
+							prevTxHashObj := &txIn.PreviousOutPoint.Hash
+							prevTx, err := btc.Client.GetRawTransaction(prevTxHashObj)
 
-							if len(tx.TxIn) > 0 {
-								// Get first input
-								txIn := tx.TxIn[0]
-								prevTxHash := txIn.PreviousOutPoint.Hash.String()
-								prevOutIndex := txIn.PreviousOutPoint.Index
+							if err != nil {
+								log.Printf("[%s] Failed to get previous transaction %s: %v",
+									btc.NetworkCode, prevTxHash, err)
+								fromAddr = ""
+							} else {
+								// Find a specific output from previous transaction
+								if int(prevOutIndex) < len(prevTx.MsgTx().TxOut) {
+									prevOut := prevTx.MsgTx().TxOut[prevOutIndex]
 
-								// Get previous transaction
-								prevTxHashObj := &txIn.PreviousOutPoint.Hash
-								prevTx, err := btc.Client.GetRawTransaction(prevTxHashObj)
-
-								if err != nil {
-									log.Printf("[%s] Failed to get previous transaction %s: %v",
-										btc.NetworkCode, prevTxHash, err)
-									fromAddr = ""
-								} else {
-									// Find a specific output from previous transaction
-									if int(prevOutIndex) < len(prevTx.MsgTx().TxOut) {
-										prevOut := prevTx.MsgTx().TxOut[prevOutIndex]
-
-										// Extract address from output
-										_, prevAddresses, _, err := txscript.ExtractPkScriptAddrs(prevOut.PkScript, btc.ChainParams)
-										if err == nil && len(prevAddresses) > 0 {
-											fromAddr = prevAddresses[0].String()
-										} else {
-											fromAddr = ""
-										}
+									// Extract address from output
+									_, prevAddresses, _, err := txscript.ExtractPkScriptAddrs(prevOut.PkScript, btc.ChainParams)
+									if err == nil && len(prevAddresses) > 0 {
+										fromAddr = prevAddresses[0].String()
 									} else {
 										fromAddr = ""
 									}
+								} else {
+									fromAddr = ""
 								}
-							} else {
-								fromAddr = ""
 							}
-
-							// Get convert amount (in BTC)
-							amount := utils.RemoveDecimals(big.NewInt(vout.Value), int64(btcDecimals))
-
-							localTxList = append(localTxList, &InboundTransaction{
-								UserId:   int(userId),
-								Currency: "BTC",
-								TxId:     txHash,
-								From:     fromAddr,
-								To:       addrStr,
-								Amount:   amount,
-							})
-
-							break
+						} else {
+							fromAddr = ""
 						}
+
+						// Get converted amount (in BTC)
+						amount := utils.RemoveDecimals(big.NewInt(vout.Value), int64(btcDecimals))
+
+						txList = append(txList, &InboundTransaction{
+							UserId:   int(userId),
+							Currency: "BTC",
+							TxId:     txHash,
+							From:     fromAddr,
+							To:       addrStr,
+							Amount:   amount,
+						})
+
+						break
 					}
 				}
 			}
-
-			// Mark the block as successfully processed
-			successfulBlocks.Store(blockHeight, true)
-			// Send batch to result channel (one send for block)
-			resultChan <- localTxList
-		}()
-	}
-
-	// Waiting for results
-	go func() {
-		wg.Wait()
-		close(resultChan)
-	}()
-
-	// Collect results from batches
-	txList := make([]*InboundTransaction, 0)
-	for batch := range resultChan {
-		txList = append(txList, batch...)
-	}
-
-	// Get the last continuously successful block
-	lastContinuousBlock := lastBlockHeight
-	for blockHeight := lastBlockHeight + 1; blockHeight <= currentBlockHeight; blockHeight++ {
-		if _, ok := successfulBlocks.Load(blockHeight); ok {
-			lastContinuousBlock = blockHeight
-		} else {
-			log.Printf("[%s] Block %d was not processed successfully, stopping at %d",
-				btc.NetworkCode, blockHeight, lastContinuousBlock)
-			break
 		}
-	}
 
-	// Save last processed block in Redis
-	if lastContinuousBlock > lastBlockHeight {
-		err = redis.GetClient().HSet(ctx, "last_blocks", btc.NetworkCode, lastContinuousBlock)
+		// Save last processed block to Redis
+		err = redis.GetClient().HSet(ctx, "last_blocks", btc.NetworkCode, blockHeight)
 		if err != nil {
-			return nil, fmt.Errorf("[%s] Failed to save last block in Redis: %w", btc.NetworkCode, err)
+			return nil, fmt.Errorf("[%s] Failed to save block %d to Redis: %w", btc.NetworkCode, blockHeight, err)
 		}
 	}
 
-	log.Printf("[%s] Processed %d transactions successful", btc.NetworkCode, len(txList))
-
+	log.Printf("[%s] Processing finished successfully, found %d user transactions", btc.NetworkCode, len(txList))
 	return txList, nil
 }
 

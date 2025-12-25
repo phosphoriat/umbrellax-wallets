@@ -34,12 +34,14 @@ import (
 	"github.com/xssnick/tonutils-go/ton/jetton"
 	"github.com/xssnick/tonutils-go/ton/wallet"
 	"github.com/xssnick/tonutils-go/tvm/cell"
+	"golang.org/x/time/rate"
 )
 
 type (
 	Ton struct {
 		BaseChainService
 		Client        ton.APIClientWrapped
+		RateLimit     int
 		WalletVersion wallet.Version
 		jettonCache   map[string]*JettonInfo
 		jettonCacheMu sync.RWMutex
@@ -73,13 +75,11 @@ func newTon() *Ton {
 
 	// Create new connection pool
 	client := liteclient.NewConnectionPool()
-
 	// Add connections to pool
 	err := client.AddConnectionsFromConfigUrl(context.Background(), cfg.TonConfigUrl)
 	if err != nil {
 		log.Fatalf("[Ton] Failed to connect to : %v", err)
 	}
-
 	// Create new Ton API client
 	apiClient := ton.NewAPIClient(client).WithRetry(3)
 
@@ -346,8 +346,9 @@ func (ton *Ton) SendTransaction(wType string, wId *string, currency, toAddr stri
 }
 
 // GetInboundTransactions Get new inbound transactions list
-func (ton *Ton) GetInboundTransactions() ([]*InboundTransaction, error) {
-	ctx := context.Background()
+func (ton *Ton) GetInboundTransactions(ctx context.Context) ([]*InboundTransaction, error) {
+	// Create rate limiter
+	limiter := rate.NewLimiter(rate.Limit(ton.RateLimit), 1)
 
 	// Get last logical time (LT) from Redis
 	lastLTStr, err := redis.GetClient().HGet(ctx, "last_blocks", ton.NetworkCode)
@@ -378,6 +379,10 @@ func (ton *Ton) GetInboundTransactions() ([]*InboundTransaction, error) {
 	}
 
 	// Get transactions list (up to 100 transactions)
+	if err := limiter.Wait(ctx); err != nil {
+		return nil, err
+	}
+
 	queryLT := lastLT
 	if lastLT > 0 {
 		queryLT++
@@ -450,8 +455,9 @@ func (ton *Ton) GetInboundTransactions() ([]*InboundTransaction, error) {
 		// Get from address
 		fromAddr := intMsg.SrcAddr.String()
 
+		switch true {
 		// Check if it's a native TON transfer
-		if intMsg.Amount.Nano().Uint64() > 0 {
+		case intMsg.Amount.Nano().Uint64() > 0:
 			// Get converted amount (in TON)
 			amount := utils.RemoveDecimals(intMsg.Amount.Nano(), int64(tonDecimals))
 
@@ -465,10 +471,9 @@ func (ton *Ton) GetInboundTransactions() ([]*InboundTransaction, error) {
 			})
 
 			log.Printf("[%s] TON transaction '%s' processed successful", ton.NetworkCode, txHash)
-		}
 
 		// Check if it's a Jetton transfer
-		if intMsg.Body != nil {
+		case intMsg.Body != nil:
 			// Parse jetton transfer from message
 			slice := intMsg.Body.BeginParse()
 
@@ -510,16 +515,16 @@ func (ton *Ton) GetInboundTransactions() ([]*InboundTransaction, error) {
 			// Get jetton wallet address (message sender is jetton wallet)
 			jettonWalletAddr := intMsg.SrcAddr.String()
 
-			// Get jetton info from cache or fetch from contract
+			// Trying to get jetton info from cache
 			ton.jettonCacheMu.RLock()
-			cached, exists := ton.jettonCache[jettonWalletAddr]
+			jettonInfo, exists := ton.jettonCache[jettonWalletAddr]
 			ton.jettonCacheMu.RUnlock()
+			// Fetch from contract
+			if !exists {
+				if err := limiter.Wait(ctx); err != nil {
+					return nil, err
+				}
 
-			var jettonInfo *JettonInfo
-			if exists {
-				// Get jetton info from cache
-				jettonInfo = cached
-			} else {
 				// Get current masterchain info
 				master, err := ton.Client.CurrentMasterchainInfo(ctx)
 				if err != nil {
@@ -599,7 +604,7 @@ func (ton *Ton) GetInboundTransactions() ([]*InboundTransaction, error) {
 		log.Printf("[%s] Saved last LT: %d", ton.NetworkCode, maxLT)
 	}
 
-	log.Printf("[%s] Processed %d transactions successful", ton.NetworkCode, len(inboundTxList))
+	log.Printf("[%s] Processing finished successfully, found %d user transactions", ton.NetworkCode, len(inboundTxList))
 
 	return inboundTxList, nil
 }

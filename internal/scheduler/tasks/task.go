@@ -3,14 +3,13 @@ package tasks
 import (
 	"context"
 	"errors"
-	"os"
 	"time"
 )
 
 type BaseTask struct {
 	name        string
-	timeout     time.Duration
 	description string
+	timeout     time.Duration
 	maxRetries  int
 }
 
@@ -36,11 +35,7 @@ func (b *BaseTask) GetMaxRetries() int {
 
 // ShouldRetry Determines whether the task should be retried on error
 func (b *BaseTask) ShouldRetry(err error) bool {
-	// Retry only for temporary errors (not for access errors)
-	if os.IsPermission(err) {
-		return false
-	}
-	// Check another type of errors
+	// Do not retry when context canceled or timeout exceeded
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}

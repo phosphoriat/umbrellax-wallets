@@ -53,7 +53,10 @@ func main() {
 	bybit.Init(cfg)
 
 	// Init scheduler
-	scheduler.Init()
+	schedulerInstance, err := scheduler.Init()
+	if err != nil {
+		log.Fatal("Failed to init scheduler:", err)
+	}
 
 	/* Create app instance */
 	app := fiber.New(fiber.Config{
@@ -94,35 +97,40 @@ func main() {
 	/* Start HTTP server */
 	// Get server address and port from config
 	address := fmt.Sprintf("%s:%s", cfg.AppUrl, cfg.AppPort)
-	// Start HTTP server in goroutine for graceful shutdown
+	// Start HTTP server in goroutine
 	go func() {
 		log.Printf("Server starting on %s", address)
 		if err := app.Listen(address); err != nil {
-			log.Fatalf("server failed to start: %v", err)
+			log.Printf("Server failed to start: %v", err)
+			p, _ := os.FindProcess(os.Getpid())
+			p.Signal(os.Interrupt)
 		}
 	}()
 
-	// Set server graceful shutdown
-	ServerGracefulShutdown(app)
+	// Application graceful shutdown
+	GracefulShutdown(app, schedulerInstance)
 }
 
-// ServerGracefulShutdown Set server graceful shutdown
-func ServerGracefulShutdown(app *fiber.App) {
-	// Create channel to signify a signal being sent
-	c := make(chan os.Signal, 1)
-	// When an interrupt or termination signal is sent, notify the channel
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-	// This blocks the main thread until an interrupt is received
-	<-c
-	log.Println("Gracefully shutting down...")
+// GracefulShutdown Application graceful shutdown
+func GracefulShutdown(app *fiber.App, schedulerInstance *scheduler.Scheduler) {
+	// Intercept termination signals
+	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	<-signalCtx.Done()
 
-	// Create a deadline for shutdown
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	log.Println("Shutting down...")
+
+	// Create a 10s deadline for shutdown
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Attempt graceful shutdown
-	if err := app.ShutdownWithContext(ctx); err != nil {
-		log.Printf("Server forced to shutdown: %v", err)
+	// Graceful shutdown app and scheduler
+	if err := app.ShutdownWithContext(shutdownCtx); err != nil {
+		log.Printf("Server shutdown error: %v", err)
 	}
-	log.Println("Server exited")
+	if err := schedulerInstance.Shutdown(); err != nil {
+		log.Printf("Scheduler shutdown error: %v", err)
+	}
+
+	log.Println("Application successfully shutdown")
 }

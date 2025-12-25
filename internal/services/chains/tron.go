@@ -29,6 +29,7 @@ import (
 	"github.com/fbsobreira/gotron-sdk/pkg/common/decimals"
 	"github.com/fbsobreira/gotron-sdk/pkg/proto/api"
 	"github.com/fbsobreira/gotron-sdk/pkg/proto/core"
+	"golang.org/x/time/rate"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/protobuf/proto"
@@ -38,6 +39,7 @@ import (
 type Tron struct {
 	BaseChainService
 	Client          *client.GrpcClient
+	RateLimit       int
 	decimalsCache   map[string]int64
 	decimalsCacheMu sync.RWMutex
 }
@@ -278,10 +280,14 @@ func (tron *Tron) SendTransaction(wType string, wId *string, currency, toAddr st
 
 // GetInboundTransactions Get new inbound transactions list
 // Returns: Inbound transactions list
-func (tron *Tron) GetInboundTransactions() ([]*InboundTransaction, error) {
-	ctx := context.Background()
+func (tron *Tron) GetInboundTransactions(ctx context.Context) ([]*InboundTransaction, error) {
+	// Create rate limiter
+	limiter := rate.NewLimiter(rate.Limit(tron.RateLimit), 1)
 
 	// Get current block
+	if err := limiter.Wait(ctx); err != nil {
+		return nil, err
+	}
 	currentBlock, err := tron.Client.GetNowBlock()
 	if err != nil {
 		return nil, fmt.Errorf("[%s] Failed to get current block: %w", tron.NetworkCode, err)
@@ -321,219 +327,168 @@ func (tron *Tron) GetInboundTransactions() ([]*InboundTransaction, error) {
 		return nil, fmt.Errorf("[%s] Failed to get TRX decimals from config: %w", tron.NetworkCode, err)
 	}
 
-	// Wait group to wait for all tx blocks goroutines to complete
-	var wg sync.WaitGroup
-	// Concurrent save map for successfully processed blocks
-	successfulBlocks := &sync.Map{}
-	// Channel for collect transactions from all blocks
-	resultChan := make(chan []*InboundTransaction, currentBlockNum-lastBlockNumber)
+	log.Printf("[%s] Processing %d blocks from %d to %d",
+		tron.NetworkCode, currentBlockNum-lastBlockNumber, lastBlockNumber+1, currentBlockNum)
 
-	log.Printf("[%s] Processing blocks %d to %d", tron.NetworkCode, lastBlockNumber+1, currentBlockNum)
+	// Transaction list for all blocks
+	txList := make([]*InboundTransaction, 0)
 
 	// Check all new blocks
 	for blockNum := lastBlockNumber + 1; blockNum <= currentBlockNum; blockNum++ {
-		wg.Add(1)
+		// Get block entity by number
+		if err := limiter.Wait(ctx); err != nil {
+			return nil, err
+		}
+		block, err := tron.Client.GetBlockByNum(blockNum)
+		if err != nil {
+			return nil, fmt.Errorf("[%s] Failed to get block %d: %w", tron.NetworkCode, blockNum, err)
+		}
 
-		go func() {
-			defer wg.Done()
+		log.Printf("[%s] Processing block %d with raw %d transactions",
+			tron.NetworkCode, blockNum, len(block.Transactions))
 
-			// Get block entity by number
-			block, err := tron.Client.GetBlockByNum(blockNum)
-			if err != nil {
-				log.Printf("[%s] Failed to get block %d: %v", tron.NetworkCode, blockNum, err)
-				resultChan <- []*InboundTransaction{}
-				return
+		// Process transactions in block
+		for _, tx := range block.Transactions {
+			if tx.Transaction.RawData == nil || len(tx.Transaction.RawData.Contract) == 0 {
+				log.Printf("[%s] Skipping block %d: no contract found", tron.NetworkCode, blockNum)
+				continue
 			}
 
-			log.Printf("[%s] Processing block %d with %d transactions",
-				tron.NetworkCode, blockNum, len(block.Transactions))
+			// Get tx hash
+			txId := fmt.Sprintf("%x", tx.GetTxid())
+			// Skip, if transaction is not success
+			if tx.Result == nil || tx.Result.Code != api.Return_SUCCESS {
+				continue
+			}
 
-			// Local goroutine tx list (one for every block)
-			localTxList := make([]*InboundTransaction, 0, len(block.Transactions))
+			// Get contract entity and tx id
+			contract := tx.Transaction.RawData.Contract[0]
 
-			// Process transactions in block
-			for _, tx := range block.Transactions {
-				if tx.Transaction.RawData == nil || len(tx.Transaction.RawData.Contract) == 0 {
-					log.Printf("[%s] Skipping block %d: no contract found", tron.NetworkCode, blockNum)
+			switch contract.Type {
+			// TRX token
+			case core.Transaction_Contract_TransferContract:
+				// Get transfer contract entity
+				transferContract := &core.TransferContract{}
+				err := proto.Unmarshal(contract.Parameter.Value, transferContract)
+				if err != nil {
+					log.Printf("[%s] Failed to unmarshal transfer contract: %v", tron.NetworkCode, err)
 					continue
 				}
 
-				// Get tx id
-				txId := fmt.Sprintf("%x", tx.GetTxid())
-				// Check if status SUCCESS
-				if tx.Result == nil {
-					log.Printf("[%s] Transaction '%s' has nil result", tron.NetworkCode, txId)
-					continue
-				}
-				if tx.Result.Code != api.Return_SUCCESS {
-					log.Printf("[%s] Transaction '%s' failed: status=%s, code=%s",
-						tron.NetworkCode, txId, tx.Result.Code.String(), tx.Result.Code)
+				if transferContract.OwnerAddress == nil || transferContract.ToAddress == nil {
+					log.Printf("[%s] Error getting transfer contract owner and to address: %v", tron.NetworkCode, err)
 					continue
 				}
 
-				// Get contract entity and tx id
-				contract := tx.Transaction.RawData.Contract[0]
+				// Get from and to address
+				fromAddr := address.Address(transferContract.OwnerAddress).String()
+				toAddr := address.Address(transferContract.ToAddress).String()
 
-				switch contract.Type {
-				// TRX token
-				case core.Transaction_Contract_TransferContract:
-					// Get transfer contract entity
-					transferContract := &core.TransferContract{}
-					err := proto.Unmarshal(contract.Parameter.Value, transferContract)
-					if err != nil {
-						log.Printf("[%s] Failed to unmarshal transfer contract: %v", tron.NetworkCode, err)
-						continue
-					}
+				// Check if address exists in network addresses list
+				if userId, ok := addressList[toAddr]; ok {
+					// Get converted amount (in TRX)
+					amount, _ := decimals.RemoveDecimals(big.NewInt(transferContract.Amount), int64(trxDecimals)).Float64()
 
-					if transferContract.OwnerAddress == nil || transferContract.ToAddress == nil {
-						log.Printf("[%s] Error getting transfer contract owner and to address: %v", tron.NetworkCode, err)
-						continue
-					}
+					txList = append(txList, &InboundTransaction{
+						UserId:   int(userId),
+						Currency: "TRX",
+						TxId:     txId,
+						From:     fromAddr,
+						To:       toAddr,
+						Amount:   amount,
+					})
+				}
 
-					// Get from and to address
-					fromAddr := address.Address(transferContract.OwnerAddress).String()
-					toAddr := address.Address(transferContract.ToAddress).String()
+			// TRC20 token
+			case core.Transaction_Contract_TriggerSmartContract:
+				// Get trigger contract entity
+				triggerContract := &core.TriggerSmartContract{}
+				err := proto.Unmarshal(contract.Parameter.Value, triggerContract)
+				if err != nil {
+					log.Printf("[%s] Failed to unmarshal trigger smart contract: %v", tron.NetworkCode, err)
+					continue
+				}
 
-					// Check if address exists in network addresses list
-					if userId, ok := addressList[toAddr]; ok {
-						// Get converted amount (in TRX)
-						amount, _ := decimals.RemoveDecimals(big.NewInt(transferContract.Amount), int64(trxDecimals)).Float64()
+				// Get contract address
+				contractAddr := address.Address(triggerContract.ContractAddress).String()
 
-						localTxList = append(localTxList, &InboundTransaction{
-							UserId:   int(userId),
-							Currency: "TRX",
-							TxId:     txId,
-							From:     fromAddr,
-							To:       toAddr,
-							Amount:   amount,
-						})
-					}
+				// Get token name by contract address
+				token, err := config.GetTokenByContractAddr(tron.NetworkCode, contractAddr)
+				if err != nil {
+					continue
+				}
 
-				// TRC20 token
-				case core.Transaction_Contract_TriggerSmartContract:
-					// Get trigger contract entity
-					triggerContract := &core.TriggerSmartContract{}
-					err := proto.Unmarshal(contract.Parameter.Value, triggerContract)
-					if err != nil {
-						log.Printf("[%s] Failed to unmarshal trigger smart contract: %v", tron.NetworkCode, err)
-						continue
-					}
+				if triggerContract.OwnerAddress == nil {
+					log.Printf("[%s] Error getting trigger smart contract owner address: %v", tron.NetworkCode, err)
+					continue
+				}
 
-					// Get contract address
-					contractAddr := address.Address(triggerContract.ContractAddress).String()
+				// Check if it's an TRC20 token transfer
+				// Data structure: 4 bytes method ID + 32 bytes address + 32 bytes amount
+				if len(triggerContract.Data) == 68 {
+					// Check if method is transfer (a9059cbb)
+					methodId := fmt.Sprintf("%x", triggerContract.Data[0:4])
+					if methodId == "a9059cbb" {
+						// Extract to address (bytes 4-36, take last 20 bytes)
+						toAddrBytes := triggerContract.Data[16:36]
 
-					// Get token name by contract address
-					token, err := config.GetTokenByContractAddr(tron.NetworkCode, contractAddr)
-					if err != nil {
-						continue
-					}
+						// Get from and to address
+						fromAddr := address.Address(triggerContract.OwnerAddress).String()
+						toAddr := address.Address(toAddrBytes).String()
 
-					if triggerContract.OwnerAddress == nil {
-						log.Printf("[%s] Error getting trigger smart contract owner address: %v", tron.NetworkCode, err)
-						continue
-					}
-
-					// Check if it's an TRC20 token transfer
-					// Data structure: 4 bytes method ID + 32 bytes address + 32 bytes amount
-					if len(triggerContract.Data) == 68 {
-						// Check if method is transfer (a9059cbb)
-						methodId := fmt.Sprintf("%x", triggerContract.Data[0:4])
-						if methodId == "a9059cbb" {
-							// Extract to address (bytes 4-36, take last 20 bytes)
-							toAddrBytes := triggerContract.Data[16:36]
-
-							// Get from and to address
-							fromAddr := address.Address(triggerContract.OwnerAddress).String()
-							toAddr := address.Address(toAddrBytes).String()
-
-							// Check if address exists in network addresses list
-							if userId, ok := addressList[toAddr]; ok {
-								// Get contract decimals from cache or fetch from contract
-								tron.decimalsCacheMu.RLock()
-								cached, exists := tron.decimalsCache[contractAddr]
-								tron.decimalsCacheMu.RUnlock()
-
-								var decimalsValue int64
-								if exists {
-									// Get contract decimals from cache
-									decimalsValue = cached
-								} else {
-									// Fetch decimals from contract
-									decimalsResult, err := tron.Client.TRC20GetDecimals(contractAddr)
-									if err != nil {
-										log.Printf("[%s] Failed to get contract decimals for '%s': %v",
-											tron.NetworkCode, contractAddr, err)
-										continue
-									}
-									decimalsValue = decimalsResult.Int64()
-
-									// Save decimals to cache
-									tron.decimalsCacheMu.Lock()
-									tron.decimalsCache[contractAddr] = decimalsValue
-									tron.decimalsCacheMu.Unlock()
+						// Check if address exists in network addresses list
+						if userId, ok := addressList[toAddr]; ok {
+							// Trying to get contract decimals from cache
+							tron.decimalsCacheMu.RLock()
+							decimalsValue, exists := tron.decimalsCache[contractAddr]
+							tron.decimalsCacheMu.RUnlock()
+							// Fetch decimals from contract
+							if !exists {
+								if err := limiter.Wait(ctx); err != nil {
+									return nil, err
 								}
 
-								// Extract amount (bytes 36-68)
-								rawAmount := new(big.Int).SetBytes(triggerContract.Data[36:68])
-								// Get converted amount
-								amount, _ := decimals.RemoveDecimals(rawAmount, decimalsValue).Float64()
+								decimalsResult, err := tron.Client.TRC20GetDecimals(contractAddr)
+								if err != nil {
+									log.Printf("[%s] Failed to get contract decimals for '%s': %v",
+										tron.NetworkCode, contractAddr, err)
+									continue
+								}
+								decimalsValue = decimalsResult.Int64()
 
-								localTxList = append(localTxList, &InboundTransaction{
-									UserId:   int(userId),
-									Currency: token,
-									TxId:     txId,
-									From:     fromAddr,
-									To:       toAddr,
-									Amount:   amount,
-								})
+								// Save decimals to cache
+								tron.decimalsCacheMu.Lock()
+								tron.decimalsCache[contractAddr] = decimalsValue
+								tron.decimalsCacheMu.Unlock()
 							}
+
+							// Extract amount (bytes 36-68)
+							rawAmount := new(big.Int).SetBytes(triggerContract.Data[36:68])
+							// Get converted amount
+							amount, _ := decimals.RemoveDecimals(rawAmount, decimalsValue).Float64()
+
+							txList = append(txList, &InboundTransaction{
+								UserId:   int(userId),
+								Currency: token,
+								TxId:     txId,
+								From:     fromAddr,
+								To:       toAddr,
+								Amount:   amount,
+							})
 						}
 					}
 				}
 			}
-
-			// Mark the block as successfully processed
-			successfulBlocks.Store(blockNum, true)
-			// Send batch to result channel (one send for block)
-			resultChan <- localTxList
-		}()
-	}
-
-	// Waiting for results
-	go func() {
-		wg.Wait()
-		close(resultChan)
-	}()
-
-	// Collect results from batches
-	txList := make([]*InboundTransaction, 0)
-	for batch := range resultChan {
-		txList = append(txList, batch...)
-	}
-
-	// Get the last continuously successful block
-	// This ensures that we don't miss blocks the next time we run
-	lastContinuousBlock := lastBlockNumber
-	for blockNum := lastBlockNumber + 1; blockNum <= currentBlockNum; blockNum++ {
-		if _, ok := successfulBlocks.Load(blockNum); ok {
-			lastContinuousBlock = blockNum
-		} else {
-			// Stop, if found the first failed block
-			log.Printf("[%s] Block %d was not processed successfully, stopping at %d",
-				tron.NetworkCode, blockNum, lastContinuousBlock)
-			break
 		}
-	}
 
-	// Save last processed block in Redis
-	if lastContinuousBlock > lastBlockNumber {
-		err = redis.GetClient().HSet(ctx, "last_blocks", tron.NetworkCode, lastContinuousBlock)
+		// Save last processed block to Redis
+		err = redis.GetClient().HSet(ctx, "last_blocks", tron.NetworkCode, blockNum)
 		if err != nil {
-			return nil, fmt.Errorf("[%s] Failed to save last block in Redis: %w", tron.NetworkCode, err)
+			return nil, fmt.Errorf("[%s] Failed to save block %d to Redis: %w", tron.NetworkCode, blockNum, err)
 		}
 	}
-	log.Printf("[%s] Processed %d transactions successful", tron.NetworkCode, len(txList))
 
+	log.Printf("[%s] Processing finished successfully, found %d user transactions", tron.NetworkCode, len(txList))
 	return txList, nil
 }
 

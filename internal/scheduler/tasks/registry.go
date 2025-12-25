@@ -8,9 +8,12 @@ type TaskRegistry struct {
 	once        sync.Once
 }
 
-// NewTaskRegistry Create new TaskRegistry instance
-func NewTaskRegistry() *TaskRegistry {
-	return &TaskRegistry{}
+// Global package vars
+var registry = &TaskRegistry{}
+
+// GetRegistry Get task registry instance
+func GetRegistry() *TaskRegistry {
+	return registry
 }
 
 // GetAllTaskDefinitions Returns all enabled task definitions
@@ -54,12 +57,12 @@ func (r *TaskRegistry) initializeDefinitions() []*TaskDefinition {
 		))
 	*/
 
-	// Process inbound transactions (every 30 seconds)
+	// Process inbound transactions (every 10 seconds)
 	definitions = append(definitions, NewTaskDefinition(
 		NewRefillsTask(),
 		TaskSchedule{
 			Type:               ScheduleTypeInterval,
-			Interval:           "5s",
+			Interval:           "10s",
 			SkipIfStillRunning: true,
 		},
 		true,
