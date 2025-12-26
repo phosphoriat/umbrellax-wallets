@@ -94,7 +94,9 @@ func newTon() *Ton {
 			NativeToken: networkSettings["native_token"].(string),
 		},
 		Client:        apiClient,
+		RateLimit:     cfg.QuickNodeRps,
 		WalletVersion: wallet.V4R2,
+		jettonCache:   make(map[string]*JettonInfo),
 	}
 }
 
@@ -346,6 +348,7 @@ func (ton *Ton) SendTransaction(wType string, wId *string, currency, toAddr stri
 }
 
 // GetInboundTransactions Get new inbound transactions list
+// Returns: Inbound transactions list
 func (ton *Ton) GetInboundTransactions(ctx context.Context) ([]*InboundTransaction, error) {
 	// Create rate limiter
 	limiter := rate.NewLimiter(rate.Limit(ton.RateLimit), 1)
@@ -378,20 +381,21 @@ func (ton *Ton) GetInboundTransactions(ctx context.Context) ([]*InboundTransacti
 		return nil, fmt.Errorf("[%s] Failed to get %s decimals from config: %w", ton.NetworkCode, "TON", err)
 	}
 
-	// Get transactions list (up to 100 transactions)
-	if err := limiter.Wait(ctx); err != nil {
-		return nil, err
-	}
-
+	// Get transactions list for master address (up to 100 transactions)
 	queryLT := lastLT
 	if lastLT > 0 {
 		queryLT++
+	}
+
+	if err := limiter.Wait(ctx); err != nil {
+		return nil, err
 	}
 	txList, err := ton.Client.ListTransactions(ctx, masterAddr, 100, queryLT, nil)
 	if err != nil {
 		return nil, fmt.Errorf("[%s] Failed to get transactions for master address: %w",
 			ton.NetworkCode, err)
 	}
+
 	// Check if tx list is not empty
 	if len(txList) == 0 {
 		log.Printf("[%s] No new txs to process", ton.NetworkCode)
@@ -413,7 +417,7 @@ func (ton *Ton) GetInboundTransactions(ctx context.Context) ([]*InboundTransacti
 			maxLT = tx.LT
 		}
 
-		// Only process incoming messages
+		// Process only incoming internal messages
 		if tx.IO.In == nil || tx.IO.In.MsgType != tlb.MsgTypeInternal {
 			continue
 		}
@@ -423,41 +427,51 @@ func (ton *Ton) GetInboundTransactions(ctx context.Context) ([]*InboundTransacti
 		// Get transaction hash
 		txHash := fmt.Sprintf("%x", tx.Hash)
 
-		// Extract comment from message body
-		var comment string
-		if intMsg.Body != nil {
-			slice := intMsg.Body.BeginParse()
-			// Check if we have at least 32 bits for op code
-			if slice.BitsLeft() >= 32 {
-				op, err := slice.LoadUInt(32)
-				if err == nil && op == 0 {
-					text, err := slice.LoadStringSnake()
-					if err == nil {
-						comment = strings.TrimSpace(text)
-					}
-				}
-			}
-		}
-		// Skip if no comment found
-		if comment == "" {
-			log.Printf("[%s] Transaction %x has no comment, skipping", ton.NetworkCode, txHash)
+		// Skip transaction, if message body is empty
+		if intMsg.Body == nil {
 			continue
 		}
 
-		// Get user id by comment (memo)
-		userId, err := ton.UserRepo.GetUserIdByNumber(comment)
+		// Parse message body once
+		slice := intMsg.Body.BeginParse()
+		// Check if at least 32 bits for op code
+		if slice.BitsLeft() < 32 {
+			continue
+		}
+		// Get op code
+		opCode, err := slice.LoadUInt(32)
 		if err != nil {
-			log.Printf("[%s] Failed to get user id by memo '%s' for tx %x: %v",
-				ton.NetworkCode, comment, txHash, err)
 			continue
 		}
 
-		// Get from address
-		fromAddr := intMsg.SrcAddr.String()
+		switch opCode {
+		// If it's a native TON transfer
+		case 0x00000000:
+			// Extract comment
+			comment, err := slice.LoadStringSnake()
+			if err != nil {
+				continue
+			}
+			comment = strings.TrimSpace(comment)
+			if comment == "" {
+				continue
+			}
 
-		switch true {
-		// Check if it's a native TON transfer
-		case intMsg.Amount.Nano().Uint64() > 0:
+			// Get user id by comment (memo)
+			userId, err := ton.UserRepo.GetUserIdByNumber(comment)
+			if err != nil {
+				log.Printf("[%s] Failed to get user id by memo '%s' in tx '%s': %v",
+					ton.NetworkCode, comment, txHash, err)
+				continue
+			}
+
+			// Check amount
+			if intMsg.Amount.Nano().Uint64() == 0 {
+				continue
+			}
+
+			// Get from address
+			fromAddr := intMsg.SrcAddr.String()
 			// Get converted amount (in TON)
 			amount := utils.RemoveDecimals(intMsg.Amount.Nano(), int64(tonDecimals))
 
@@ -472,25 +486,8 @@ func (ton *Ton) GetInboundTransactions(ctx context.Context) ([]*InboundTransacti
 
 			log.Printf("[%s] TON transaction '%s' processed successful", ton.NetworkCode, txHash)
 
-		// Check if it's a Jetton transfer
-		case intMsg.Body != nil:
-			// Parse jetton transfer from message
-			slice := intMsg.Body.BeginParse()
-
-			// Check if we have enough bits for op code
-			if slice.BitsLeft() < 32 {
-				continue
-			}
-			// Get op code
-			opCode, err := slice.LoadUInt(32)
-			if err != nil {
-				continue
-			}
-			// 0x7362d09c - internal_transfer (jetton transfer to wallet)
-			if opCode != 0x7362d09c {
-				continue
-			}
-
+		// If it's a Jetton transfer (0x7362d09c - internal_transfer to wallet)
+		case 0x7362d09c:
 			// Skip query_id (64 bits)
 			if slice.BitsLeft() < 64 {
 				continue
@@ -506,9 +503,46 @@ func (ton *Ton) GetInboundTransactions(ctx context.Context) ([]*InboundTransacti
 				continue
 			}
 
-			// Read from address (sender of jettons)
+			// Read sender address
 			jettonSender, err := slice.LoadAddr()
 			if err != nil {
+				continue
+			}
+
+			// Read forward payload for comment
+			// Skip response_destination
+			_, _ = slice.LoadAddr()
+			// Skip custom_payload flag
+			if slice.BitsLeft() > 0 {
+				_, _ = slice.LoadUInt(1)
+			}
+			// Try to read forward_ton_amount
+			_, _ = slice.LoadBigCoins()
+
+			// Try to read comment from forward_payload
+			var comment string
+			if slice.RefsNum() > 0 {
+				ref, err := slice.LoadRef()
+				if err == nil {
+					if ref.BitsLeft() >= 32 {
+						op, _ := ref.LoadUInt(32)
+						if op == 0 {
+							comment, _ = ref.LoadStringSnake()
+							comment = strings.TrimSpace(comment)
+						}
+					}
+				}
+			}
+			// Check, if transaction has comment
+			if comment == "" {
+				log.Printf("[%s] Jetton tx '%s' has no comment", ton.NetworkCode, txHash)
+				continue
+			}
+
+			// Get user by comment (memo)
+			userId, err := ton.UserRepo.GetUserIdByNumber(comment)
+			if err != nil {
+				log.Printf("[%s] Failed to get user by memo '%s': %v", ton.NetworkCode, comment, err)
 				continue
 			}
 
@@ -595,7 +629,7 @@ func (ton *Ton) GetInboundTransactions(ctx context.Context) ([]*InboundTransacti
 		}
 	}
 
-	// Save max LT as last processed
+	// Save max LT as last processed in Redis
 	if maxLT > lastLT {
 		err = redis.GetClient().HSet(ctx, "last_blocks", ton.NetworkCode, maxLT)
 		if err != nil {
@@ -605,7 +639,6 @@ func (ton *Ton) GetInboundTransactions(ctx context.Context) ([]*InboundTransacti
 	}
 
 	log.Printf("[%s] Processing finished successfully, found %d user transactions", ton.NetworkCode, len(inboundTxList))
-
 	return inboundTxList, nil
 }
 
