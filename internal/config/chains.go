@@ -7,7 +7,7 @@ type (
 		NativeToken  string
 		BybitAddress string
 		FeeBuffer    float64
-		BlockTime    float64
+		BlockTime    int
 		ABI          string
 		ForwardFee   string
 		MessageFee   string

@@ -2,9 +2,6 @@ package chains
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha512"
-	"encoding/binary"
 	"fmt"
 	"log"
 	"math/big"
@@ -19,9 +16,9 @@ import (
 	"wallets/internal/services/api/bybit"
 	"wallets/internal/utils"
 
-	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcjson"
 	"github.com/btcsuite/btcd/btcutil"
+	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/rpcclient"
@@ -45,7 +42,7 @@ var (
 	btcOnce     sync.Once
 )
 
-// Global constants
+// Global package constants
 const (
 	BtcBaseTxSize       = 10 // Base transaction size (version (4) + locktime (4) + segwit marker/flag (2))
 	BtcInputSize        = 68 // Input size (outpoint (36) + scriptSig (1) + sequence (4) + witness (~27 vbytes))
@@ -81,15 +78,6 @@ func newBitcoin() *Bitcoin {
 	// Get network settings
 	networkCode := "bitcoin"
 	nativeToken := config.NetworkSettings[networkCode].NativeToken
-
-	// @TODO Remove
-	// Test query
-	log.Printf("[Bitcoin] Testing connection...")
-	height, err := client.GetBlockCount()
-	if err != nil {
-		log.Printf("[Bitcoin] Connection test failed: %v", err)
-	}
-	log.Printf("[Bitcoin] Connected successfully, block height: %d", height)
 
 	return &Bitcoin{
 		BaseChainService: BaseChainService{
@@ -586,7 +574,7 @@ func (btc *Bitcoin) GetInboundTransactions(ctx context.Context) ([]*InboundTrans
 							amount := utils.RemoveDecimals(big.NewInt(vout.Value), int64(btcDecimals))
 
 							localTxList = append(localTxList, &InboundTransaction{
-								UserId:   int(userId),
+								UserId:   userId,
 								Currency: "BTC",
 								TxId:     txHash,
 								From:     fromAddr,
@@ -682,61 +670,35 @@ func (btc *Bitcoin) deriveWallet(mnemonic string, userId uint32) (string, string
 	// Convert mnemonic to seed
 	seed := bip39.NewSeed(mnemonic, "")
 
-	// Init master HD key (BIP32)
-	mac := hmac.New(sha512.New, []byte("Bitcoin seed"))
-	mac.Write(seed)
-	result := mac.Sum(nil)
+	// Create HD master key from seed
+	masterKey, err := hdkeychain.NewMaster(seed, &chaincfg.MainNetParams)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to create master key: %w", err)
+	}
 
-	currentKey := result[:32]
-	currentChainCode := result[32:]
-
-	// BIP84: m/84'/0'/0'/0/{userId}
+	// BIP84 derivation path: m/84'/0'/0'/0/{userId}
 	path := []uint32{
-		0x80000054, // 84'
-		0x80000000, // 0'
-		0x80000000, // 0'
-		0,          // 0
+		hdkeychain.HardenedKeyStart + 84,
+		hdkeychain.HardenedKeyStart + 0,
+		hdkeychain.HardenedKeyStart + 0,
+		0,
 		userId,
 	}
-
-	// Derive child keys
-	for _, index := range path {
-		var data []byte
-
-		if index >= 0x80000000 {
-			data = make([]byte, 37)
-			data[0] = 0x00
-			copy(data[1:33], currentKey)
-			binary.BigEndian.PutUint32(data[33:], index)
-		} else {
-			privKey, _ := btcec.PrivKeyFromBytes(currentKey)
-			data = make([]byte, 37)
-			copy(data[:33], privKey.PubKey().SerializeCompressed())
-			binary.BigEndian.PutUint32(data[33:], index)
+	key := masterKey
+	for _, idx := range path {
+		key, err = key.Derive(idx)
+		if err != nil {
+			return "", "", fmt.Errorf("failed to derive key: %w", err)
 		}
-
-		h := hmac.New(sha512.New, currentChainCode)
-		h.Write(data)
-		result := h.Sum(nil)
-
-		childScalar := new(btcec.ModNScalar)
-		childScalar.SetByteSlice(result[:32])
-
-		parentKey, _ := btcec.PrivKeyFromBytes(currentKey)
-		childScalar.Add(&parentKey.Key)
-
-		keyBytes := childScalar.Bytes()
-		currentKey = keyBytes[:]
-		currentChainCode = result[32:]
 	}
 
-	// Create private key
-	privateKey, _ := btcec.PrivKeyFromBytes(currentKey)
-	if privateKey == nil {
-		return "", "", fmt.Errorf("failed to create private key")
+	// Get private key
+	privateKey, err := key.ECPrivKey()
+	if err != nil {
+		return "", "", fmt.Errorf("failed to get private key: %w", err)
 	}
 
-	// Create Native SegWit (P2WPKH) address (bc1...)
+	// Get Native SegWit (P2WPKH) address (bc1...)
 	witnessProg := btcutil.Hash160(privateKey.PubKey().SerializeCompressed())
 	addr, err := btcutil.NewAddressWitnessPubKeyHash(witnessProg, &chaincfg.MainNetParams)
 	if err != nil {

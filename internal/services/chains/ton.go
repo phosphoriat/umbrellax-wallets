@@ -458,7 +458,7 @@ func (ton *Ton) GetInboundTransactions(ctx context.Context) ([]*InboundTransacti
 			amount := utils.RemoveDecimals(intMsg.Amount.Nano(), int64(tonDecimals))
 
 			inboundTxList = append(inboundTxList, &InboundTransaction{
-				UserId:   int(userId),
+				UserId:   userId,
 				Currency: "TON",
 				TxId:     txHash,
 				From:     fromAddr,
@@ -591,7 +591,7 @@ func (ton *Ton) GetInboundTransactions(ctx context.Context) ([]*InboundTransacti
 			amount := utils.RemoveDecimals(jettonAmount, jettonInfo.decimals)
 
 			inboundTxList = append(inboundTxList, &InboundTransaction{
-				UserId:   int(userId),
+				UserId:   userId,
 				Currency: jettonInfo.token,
 				TxId:     txHash,
 				From:     jettonSender.String(),

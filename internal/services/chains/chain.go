@@ -253,9 +253,9 @@ func TransferTokensToMasterWallet(ctx context.Context, chainService ChainService
 			return 0, fmt.Errorf("[TransferTokensToMasterWallet] SendNativeTokenToUser step failed: %w", retryErr)
 		}
 
-		// Delay to wait for confirm native token transaction (3 seconds)
+		// Delay to wait for confirm native token transaction (block time seconds)
 		select {
-		case <-time.After(3 * time.Second):
+		case <-time.After(time.Duration(cfg.BlockTime) * time.Second):
 		case <-ctx.Done():
 			return 0, fmt.Errorf("[TransferTokensToMasterWallet] Context cancelled during delay: %w", ctx.Err())
 		}

@@ -403,7 +403,7 @@ func (eth *Ethereum) GetInboundTransactions(ctx context.Context) ([]*InboundTran
 						amount := utils.RemoveDecimals(tx.Value(), int64(ethDecimals))
 
 						localTxList = append(localTxList, &InboundTransaction{
-							UserId:   int(userId),
+							UserId:   userId,
 							Currency: "ETH",
 							TxId:     txHash,
 							From:     strings.ToLower(from.Hex()),
@@ -475,7 +475,7 @@ func (eth *Ethereum) GetInboundTransactions(ctx context.Context) ([]*InboundTran
 							amount := utils.RemoveDecimals(rawAmount, decimalsValue)
 
 							localTxList = append(localTxList, &InboundTransaction{
-								UserId:   int(userId),
+								UserId:   userId,
 								Currency: token,
 								TxId:     txHash,
 								From:     strings.ToLower(from.Hex()),
@@ -581,7 +581,7 @@ func (eth *Ethereum) deriveWallet(mnemonic string, userId uint32) (string, strin
 		return "", "", fmt.Errorf("failed to derive master HD key: %w", err)
 	}
 
-	// BIP44 derivation: m/44'/60'/0'/0/{index} (accountKey = 0)
+	// BIP44 derivation path: m/44'/60'/0'/0/{index} (accountKey = 0)
 	path := []uint32{
 		hdkeychain.HardenedKeyStart + 44,
 		hdkeychain.HardenedKeyStart + 60,
@@ -590,10 +590,10 @@ func (eth *Ethereum) deriveWallet(mnemonic string, userId uint32) (string, strin
 		userId,
 	}
 	key := masterKey
-	for i, p := range path {
-		key, err = key.Derive(p)
+	for _, idx := range path {
+		key, err = key.Derive(idx)
 		if err != nil {
-			return "", "", fmt.Errorf("failed to derive key at depth %d: %w", i, err)
+			return "", "", fmt.Errorf("failed to derive key: %w", err)
 		}
 	}
 

@@ -2,7 +2,6 @@ package chains
 
 import (
 	"context"
-	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
 	"fmt"
@@ -20,7 +19,6 @@ import (
 
 	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg"
-	"github.com/btcsuite/btcutil/base58"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/fbsobreira/gotron-sdk/pkg/address"
 	"github.com/fbsobreira/gotron-sdk/pkg/client"
@@ -396,7 +394,7 @@ func (tron *Tron) GetInboundTransactions(ctx context.Context) ([]*InboundTransac
 						amount, _ := decimals.RemoveDecimals(big.NewInt(transferContract.Amount), int64(trxDecimals)).Float64()
 
 						localTxList = append(localTxList, &InboundTransaction{
-							UserId:   int(userId),
+							UserId:   userId,
 							Currency: "TRX",
 							TxId:     txId,
 							From:     fromAddr,
@@ -475,7 +473,7 @@ func (tron *Tron) GetInboundTransactions(ctx context.Context) ([]*InboundTransac
 								amount, _ := decimals.RemoveDecimals(rawAmount, decimalsValue).Float64()
 
 								localTxList = append(localTxList, &InboundTransaction{
-									UserId:   int(userId),
+									UserId:   userId,
 									Currency: token,
 									TxId:     txId,
 									From:     fromAddr,
@@ -582,7 +580,7 @@ func (tron *Tron) deriveWallet(mnemonic string, userId uint32) (string, string, 
 		return "", "", fmt.Errorf("failed to derive master HD key: %w", err)
 	}
 
-	// BIP44 derivation: m/44'/195'/0'/0/{index} (accountKey = 0)
+	// BIP44 derivation path: m/44'/195'/0'/0/{index} (accountKey = 0)
 	path := []uint32{
 		hdkeychain.HardenedKeyStart + 44,
 		hdkeychain.HardenedKeyStart + 195,
@@ -591,37 +589,24 @@ func (tron *Tron) deriveWallet(mnemonic string, userId uint32) (string, string, 
 		userId,
 	}
 	key := masterKey
-	for i, p := range path {
-		key, err = key.Derive(p)
+	for _, idx := range path {
+		key, err = key.Derive(idx)
 		if err != nil {
-			return "", "", fmt.Errorf("failed to derive key at depth %d: %w", i, err)
+			return "", "", fmt.Errorf("failed to derive key: %w", err)
 		}
 	}
 
 	// Get private key
-	btcecPrivKey, err := key.ECPrivKey()
+	privateKey, err := key.ECPrivKey()
 	if err != nil {
-		return "", "", fmt.Errorf("failed to get EC private key: %w", err)
+		return "", "", fmt.Errorf("failed to get private key: %w", err)
 	}
-	ecdsaPrivKey := btcecPrivKey.ToECDSA()
-	privateKey := hex.EncodeToString(crypto.FromECDSA(ecdsaPrivKey))
+	ecdsaPrivKey := privateKey.ToECDSA()
 
-	// Get public key and convert to Tron address
-	pubKeyBytes := crypto.FromECDSAPub(&ecdsaPrivKey.PublicKey)[1:] // remove 0x04 prefix
-	hash := crypto.Keccak256(pubKeyBytes)
+	// Get address
+	addr := address.PubkeyToAddress(ecdsaPrivKey.PublicKey).String()
 
-	// Take last 20 bytes + Tron prefix (0x41)
-	addressBytes := append([]byte{0x41}, hash[12:]...)
-
-	// Double SHA256 checksum
-	checksum1 := sha256.Sum256(addressBytes)
-	checksum2 := sha256.Sum256(checksum1[:])
-
-	// Base58 encode with checksum
-	finalBytes := append(addressBytes, checksum2[:4]...)
-	addr := base58.Encode(finalBytes)
-
-	return addr, privateKey, nil
+	return addr, hex.EncodeToString(privateKey.Serialize()), nil
 }
 
 /* GetMasterWallet private methods group */

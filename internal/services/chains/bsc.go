@@ -402,7 +402,7 @@ func (bsc *Bsc) GetInboundTransactions(ctx context.Context) ([]*InboundTransacti
 						amount := utils.RemoveDecimals(tx.Value(), int64(bnbDecimals))
 
 						localTxList = append(localTxList, &InboundTransaction{
-							UserId:   int(userId),
+							UserId:   userId,
 							Currency: "BNB",
 							TxId:     txHash,
 							From:     strings.ToLower(from.Hex()),
@@ -477,7 +477,7 @@ func (bsc *Bsc) GetInboundTransactions(ctx context.Context) ([]*InboundTransacti
 							amount := utils.RemoveDecimals(rawAmount, decimalsValue)
 
 							localTxList = append(localTxList, &InboundTransaction{
-								UserId:   int(userId),
+								UserId:   userId,
 								Currency: token,
 								TxId:     txHash,
 								From:     strings.ToLower(from.Hex()),
@@ -583,7 +583,7 @@ func (bsc *Bsc) deriveWallet(mnemonic string, userId uint32) (string, string, er
 		return "", "", fmt.Errorf("failed to derive master HD key: %w", err)
 	}
 
-	// BIP44 derivation: m/44'/60'/1'/0/{index} (accountKey = 1)
+	// BIP44 derivation path: m/44'/60'/1'/0/{index} (accountKey = 1)
 	path := []uint32{
 		hdkeychain.HardenedKeyStart + 44,
 		hdkeychain.HardenedKeyStart + 60,
@@ -592,10 +592,10 @@ func (bsc *Bsc) deriveWallet(mnemonic string, userId uint32) (string, string, er
 		userId,
 	}
 	key := masterKey
-	for i, p := range path {
-		key, err = key.Derive(p)
+	for _, idx := range path {
+		key, err = key.Derive(idx)
 		if err != nil {
-			return "", "", fmt.Errorf("failed to derive key at depth %d: %w", i, err)
+			return "", "", fmt.Errorf("failed to derive key: %w", err)
 		}
 	}
 

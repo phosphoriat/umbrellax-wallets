@@ -22,7 +22,7 @@ type Client struct {
 	lifetimeWatcher *api.LifetimeWatcher
 }
 
-// Package level constants
+// Global package constants
 const (
 	KVMount = "kv" // Default mount path for KV v2 secrets engine
 )
@@ -60,7 +60,7 @@ func newVaultClient(cfg *config.Config) (*Client, error) {
 	// Configure Vault client
 	vaultConfig := api.DefaultConfig()
 	vaultConfig.Address = fmt.Sprintf("%s://%s:%s", cfg.VaultScheme, cfg.VaultHost, cfg.VaultPort)
-	vaultConfig.Timeout = 10 * time.Second
+	vaultConfig.Timeout = 5 * time.Second
 
 	// Create Vault client
 	vaultClient, err := api.NewClient(vaultConfig)
@@ -68,15 +68,10 @@ func newVaultClient(cfg *config.Config) (*Client, error) {
 		return nil, fmt.Errorf("failed to create Vault client: %w", err)
 	}
 
-	// Set authentication token
-	if cfg.VaultToken != "" {
-		vaultClient.SetToken(cfg.VaultToken)
-	}
-
-	// Connection test
+	// Create timeout for health check
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-
+	// Check Vault health
 	health, err := vaultClient.Sys().HealthWithContext(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to check Vault health: %w", err)
@@ -88,12 +83,12 @@ func newVaultClient(cfg *config.Config) (*Client, error) {
 		return nil, fmt.Errorf("vault is sealed")
 	}
 
-	log.Printf("Vault connection established: %s://%s:%s (Version: %s)",
+	log.Printf("Vault connection established: %s://%s:%s (version: %s)",
 		cfg.VaultScheme, cfg.VaultHost, cfg.VaultPort, health.Version)
 
 	// Create context for lifecycle management
 	clientCtx, clientCancel := context.WithCancel(context.Background())
-
+	// Create client entity
 	client := &Client{
 		vault:  vaultClient,
 		ctx:    clientCtx,
@@ -247,10 +242,10 @@ func (c *Client) startTokenRenewal() error {
 	// Get TTL from data
 	var increment int
 	if ttl, ok := secret.Data["ttl"].(float64); ok {
-		increment = int(ttl / 2) // Renew for 1/2 of TTL
+		increment = int(ttl / 3) // Renew for 1/3 of TTL
 	} else if ttl, ok := secret.Data["ttl"].(json.Number); ok {
 		ttlInt, _ := ttl.Int64()
-		increment = int(ttlInt / 2)
+		increment = int(ttlInt / 3)
 	} else {
 		increment = 3600 // Fallback to 1 hour
 	}

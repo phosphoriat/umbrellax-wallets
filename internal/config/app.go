@@ -34,6 +34,7 @@ type Config struct {
 	RedisBybitReqsKey        string
 	RedisBybitWithdrawalsKey string
 	// Vault
+	VaultScheme   string
 	VaultHost     string
 	VaultPort     string
 	VaultRoleId   string
@@ -106,6 +107,7 @@ func Load() (*Config, error) {
 		RedisWithdrawalsKey:      getEnv("REDIS_WITHDRAWALS_KEY", ""),
 		RedisRefillsKey:          getEnv("REDIS_REFILLS_KEY", ""),
 		// Vault
+		VaultScheme:   getEnv("VAULT_SCHEME", "http"),
 		VaultHost:     getEnv("VAULT_HOST", "localhost"),
 		VaultPort:     getEnv("VAULT_PORT", ""),
 		VaultRoleId:   getEnv("VAULT_ROLE_ID", ""),

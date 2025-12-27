@@ -21,6 +21,7 @@ import (
 	"wallets/internal/services/api/bybit"
 	"wallets/internal/utils"
 
+	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 	bin "github.com/gagliardetto/binary"
 	"github.com/gagliardetto/solana-go"
 	ata "github.com/gagliardetto/solana-go/programs/associated-token-account"
@@ -459,7 +460,7 @@ func (sol *Solana) GetInboundTransactions(ctx context.Context) ([]*InboundTransa
 						amount := utils.RemoveDecimals(big.NewInt(int64(rawAmount)), int64(solDecimals))
 
 						localTxList = append(localTxList, &InboundTransaction{
-							UserId:   int(userId),
+							UserId:   userId,
 							Currency: "SOL",
 							TxId:     txHash,
 							From:     fromAddr,
@@ -601,7 +602,7 @@ func (sol *Solana) GetInboundTransactions(ctx context.Context) ([]*InboundTransa
 						amount := utils.RemoveDecimals(big.NewInt(int64(tokenAmount)), decimalsValue)
 
 						localTxList = append(localTxList, &InboundTransaction{
-							UserId:   int(userId),
+							UserId:   userId,
 							Currency: tokenSymbol,
 							TxId:     txHash,
 							From:     fromAddr,
@@ -695,7 +696,7 @@ func (sol *Solana) deriveWallet(mnemonic string, userId uint32) (string, string,
 	// Convert mnemonic to seed
 	seed := bip39.NewSeed(mnemonic, "")
 
-	// Init master HD key (BIP32-Ed25519)
+	// Init master HD key (SLIP-0010 uses "ed25519 seed")
 	mac := hmac.New(sha512.New, []byte("ed25519 seed"))
 	mac.Write(seed)
 	result := mac.Sum(nil)
@@ -703,13 +704,13 @@ func (sol *Solana) deriveWallet(mnemonic string, userId uint32) (string, string,
 	currentKey := result[:32]
 	currentChainCode := result[32:]
 
-	// Solana derivation path: m/44'/501'/0'/0'/{userId}'
+	// BIP44 derivation path: m/44'/501'/0'/0'/{userId}'
 	path := []uint32{
-		0x8000002C,          // 44'
-		0x800001F5,          // 501'
-		0x80000000,          // 0'
-		0x80000000,          // 0'
-		0x80000000 + userId, // {userId}'
+		hdkeychain.HardenedKeyStart + 44,
+		hdkeychain.HardenedKeyStart + 501,
+		hdkeychain.HardenedKeyStart + 0,
+		hdkeychain.HardenedKeyStart + 0,
+		hdkeychain.HardenedKeyStart + userId,
 	}
 
 	// Derive child keys (all hardened for Ed25519)
