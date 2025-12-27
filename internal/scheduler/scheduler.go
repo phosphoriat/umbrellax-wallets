@@ -90,12 +90,8 @@ func Init() (*Scheduler, error) {
 		if !execution.Success {
 			status = "✗"
 		}
-
 		log.Printf("%s Task: %s | Duration: %v | Attempts: %d",
 			status, execution.TaskName, execution.Duration, execution.RetryCount+1)
-		if execution.Error != nil {
-			log.Printf(" | Error: %v", execution.Error)
-		}
 	})
 
 	// Register all enabled tasks
@@ -363,7 +359,7 @@ func (s *Scheduler) executeTask(ctx context.Context, task tasks.ScheduledTask) e
 		ID:         uuid.New(),
 		TaskName:   task.GetName(),
 		StartTime:  time.Now(),
-		Context:    make(map[string]interface{}),
+		Context:    make(map[string]any),
 		RetryCount: 0,
 	}
 	log.Printf("Executing task: %s [ID: %s]", task.GetName(), execution.ID.String())
@@ -385,17 +381,14 @@ func (s *Scheduler) executeTask(ctx context.Context, task tasks.ScheduledTask) e
 
 		// Execution successful
 		if err == nil {
+			// Save execution data
 			now := time.Now()
 			execution.Success = true
 			execution.EndTime = &now
 			execution.Duration = execution.EndTime.Sub(execution.StartTime)
 
-			log.Printf("✓ Task %s completed successfully (duration: %v, attempts: %d)",
-				task.GetName(), execution.Duration, attempt+1)
-
 			// Run scheduler level callbacks
 			s.runSchedulerCallbacks(execution)
-
 			// Run task level callback
 			s.runTaskCallback(task.GetName(), execution)
 
@@ -404,16 +397,14 @@ func (s *Scheduler) executeTask(ctx context.Context, task tasks.ScheduledTask) e
 
 		// Process timeout error
 		if errors.Is(err, context.DeadlineExceeded) {
-			log.Printf("Task %s timed out after %v on attempt %d",
-				task.GetName(), timeout, attempt+1)
+			log.Printf("Task %s timed out after %v on attempt %d", task.GetName(), timeout, attempt+1)
 		}
 
 		// Execution failed
 		lastErr = err
 		// Check, if it should retry
 		if attempt < maxRetries && task.ShouldRetry(err) {
-			log.Printf("Task %s failed on attempt %d, retrying: %v",
-				task.GetName(), attempt+1, err)
+			log.Printf("Task %s failed on attempt %d, retrying", task.GetName(), attempt+1)
 
 			// Linear delay
 			backoff := time.Second

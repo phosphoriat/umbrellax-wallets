@@ -3,15 +3,9 @@ package chains
 import (
 	"bytes"
 	"context"
-	"crypto/ed25519"
-	"crypto/hmac"
-	"crypto/sha512"
 	"encoding/base64"
-	"encoding/binary"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"math/big"
 	"net/http"
@@ -83,15 +77,15 @@ func newTon() *Ton {
 	// Create new Ton API client
 	apiClient := ton.NewAPIClient(client).WithRetry(3)
 
-	networkCode := "ton"
 	// Get network settings
-	networkSettings := config.NetworkSettings[networkCode].(map[string]any)
+	networkCode := "ton"
+	nativeToken := config.NetworkSettings[networkCode].NativeToken
 
 	return &Ton{
 		BaseChainService: BaseChainService{
 			UserRepo:    repository.NewUserRepository(),
 			NetworkCode: networkCode,
-			NativeToken: networkSettings["native_token"].(string),
+			NativeToken: nativeToken,
 		},
 		Client:        apiClient,
 		RateLimit:     cfg.QuickNodeRps,
@@ -108,26 +102,37 @@ func (ton *Ton) GetCode() string {
 // GetUserWallet Get user HD-wallet by user id
 // userId: Unique user id
 // Returns: Master wallet address (for using MEMO tags)
-func (ton *Ton) GetUserWallet(userId int) (string, error) {
+func (ton *Ton) GetUserWallet(userId uint32) (string, error) {
 	// Get master wallet data from Vault
-	masterData, err := vault.GetClient().GetSecret("/master/" + ton.NetworkCode)
+	masterData, err := vault.GetClient().GetSecret("master/" + ton.NetworkCode)
 	if err != nil {
 		return "", fmt.Errorf("failed to get master data: %w", err)
 	}
+	masterAddr, ok := masterData["address"].(string)
+	if !ok || masterAddr == "" {
+		return "", fmt.Errorf("master address not found in Vault")
+	}
 
-	return masterData["address"].(string), nil
+	return masterAddr, nil
 }
 
 // GetMasterWallet Get master wallet info (address and token balances)
 // Returns: Map of master wallet info (address and balances of all available tokens)
 func (ton *Ton) GetMasterWallet() (map[string]any, error) {
 	// Get master wallet info from Vault
-	masterData, err := vault.GetClient().GetSecret("/master/" + ton.NetworkCode)
+	masterData, err := vault.GetClient().GetSecret("master/" + ton.NetworkCode)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get master data: %w", err)
 	}
-	masterAddr := masterData["address"].(string)
-	seedWords := strings.Split(masterData["mnemonic"].(string), "")
+	masterAddr, ok := masterData["address"].(string)
+	if !ok || masterAddr == "" {
+		return nil, fmt.Errorf("master address not found in Vault")
+	}
+	masterMnemonic, ok := masterData["mnemonic"].(string)
+	if !ok || masterMnemonic == "" {
+		return nil, fmt.Errorf("master mnemonic not found in Vault")
+	}
+	seedWords := strings.Split(masterMnemonic, "")
 
 	// Init wallet instance
 	walletInstance, err := wallet.FromSeedWithOptions(ton.Client, seedWords, ton.WalletVersion)
@@ -137,7 +142,7 @@ func (ton *Ton) GetMasterWallet() (map[string]any, error) {
 
 	// Get Jetton token balances
 	balances := make(map[string]any)
-	for token, contractAddr := range config.ContractsAddresses[ton.NetworkCode].(map[string]string) {
+	for token, contractAddr := range config.ContractsAddresses[ton.NetworkCode] {
 		tokenBalance, _ := ton.getJettonBalance(token, contractAddr, masterAddr)
 		balances[token] = tokenBalance
 	}
@@ -154,28 +159,16 @@ func (ton *Ton) GetMasterWallet() (map[string]any, error) {
 
 // GetTransactionCommission Get transaction commission
 // oType: Operation type (withdrawal/inner)
-// wType: Wallet type (master/user)
-// wId: User id (only for user wType)
+// wType: Wallet type (always master in TON)
+// wId: User id (not use in TON)
 // currency: Token ticker
 // toAddr: Withdrawal to address
 // amount: Amount in float value
 // memo: Memo tag
 // Returns: Map of all fee types (chain_fee, bybit_fee, aml_fee)
-func (ton *Ton) GetTransactionCommission(
-	oType, wType string, wId *string, currency, toAddr string, amount float64, memo string,
-) (map[string]float64, error) {
-	var walletPath string
-	if wType == "master" {
-		walletPath = "/master/" + ton.NetworkCode
-	} else {
-		if wId == nil {
-			return nil, fmt.Errorf("wId is required")
-		}
-		walletPath = fmt.Sprintf("/users/%s/%s", *wId, ton.NetworkCode)
-	}
-
+func (ton *Ton) GetTransactionCommission(oType, wType string, wId *uint32, currency, toAddr string, amount float64, memo string) (map[string]float64, error) {
 	// Get wallet data from Vault
-	walletData, err := vault.GetClient().GetSecret(walletPath)
+	walletData, err := vault.GetClient().GetSecret("master/" + ton.NetworkCode)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get wallet data: %w", err)
 	}
@@ -206,12 +199,13 @@ func (ton *Ton) GetTransactionCommission(
 
 	var bybitFee, amlFee float64
 	if oType == "withdrawal" {
-		// Get bybit withdrawal fee (in currency value)
-		bybitFee, _ = bybit.GetHTTPClient().GetWithdrawalFee(currency, ton.NetworkCode)
-
-		// Get AML check cost from config (in USD value)
+		// Load config
 		cfg, _ := config.Load()
-		amlFee, _ = strconv.ParseFloat(cfg.AmlCheckCost, 64)
+
+		// Get bybit withdrawal fee (in currency value)
+		bybitFee, _ = bybit.GetClient().GetWithdrawalFee(context.Background(), currency, ton.NetworkCode)
+		// Get AML check cost from config (in USD value)
+		amlFee = cfg.AmlCheckCost
 	}
 
 	return map[string]float64{
@@ -295,26 +289,16 @@ func (ton *Ton) GetTransactionStatus(hash, toAddr string) (string, error) {
 }
 
 // SendTransaction Send transaction to the network
-// wType: Wallet type (master/user)
-// wId: User id (only for user wType)
+// wType: Wallet type (always master in TON)
+// wId: User id (not use in TON)
 // currency: Token ticker
 // toAddr: Withdrawal to address
 // amount: Amount in float value
 // memo: Memo tag
 // Returns: Transaction hash
-func (ton *Ton) SendTransaction(wType string, wId *string, currency, toAddr string, amount float64, memo string) (string, error) {
-	var walletPath string
-	if wType == "master" {
-		walletPath = fmt.Sprintf("/master/%s", ton.NetworkCode)
-	} else {
-		if wId == nil {
-			return "", fmt.Errorf("wId is required")
-		}
-		walletPath = fmt.Sprintf("/users/%s/%s", *wId, ton.NetworkCode)
-	}
-
+func (ton *Ton) SendTransaction(wType string, wId *uint32, currency, toAddr string, amount float64, memo string) (string, error) {
 	// Get wallet data from Vault
-	walletData, err := vault.GetClient().GetSecret(walletPath)
+	walletData, err := vault.GetClient().GetSecret("master/" + ton.NetworkCode)
 	if err != nil {
 		return "", fmt.Errorf("failed to get wallet data: %w", err)
 	}
@@ -364,7 +348,7 @@ func (ton *Ton) GetInboundTransactions(ctx context.Context) ([]*InboundTransacti
 	}
 
 	// Get master wallet address from Vault
-	masterData, err := vault.GetClient().GetSecret("/master/" + ton.NetworkCode)
+	masterData, err := vault.GetClient().GetSecret("master/" + ton.NetworkCode)
 	if err != nil {
 		return nil, fmt.Errorf("[%s] Failed to get master data: %w", ton.NetworkCode, err)
 	}
@@ -373,13 +357,7 @@ func (ton *Ton) GetInboundTransactions(ctx context.Context) ([]*InboundTransacti
 	masterAddr := address.MustParseAddr(masterAddrStr)
 
 	// Get TON decimals from config
-	tonDecimals, err := config.GetChainSetting[int](
-		config.TokenSettings,
-		fmt.Sprintf("%s.%s.decimals", ton.NetworkCode, "TON"),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("[%s] Failed to get %s decimals from config: %w", ton.NetworkCode, "TON", err)
-	}
+	tonDecimals := config.TokenSettings[ton.NetworkCode]["TON"].Decimals
 
 	// Get transactions list for master address (up to 100 transactions)
 	queryLT := lastLT
@@ -392,6 +370,10 @@ func (ton *Ton) GetInboundTransactions(ctx context.Context) ([]*InboundTransacti
 	}
 	txList, err := ton.Client.ListTransactions(ctx, masterAddr, 100, queryLT, nil)
 	if err != nil {
+		if strings.Contains(err.Error(), "no transactions were found") {
+			log.Printf("[%s] No transactions found yet", ton.NetworkCode)
+			return []*InboundTransaction{}, nil
+		}
 		return nil, fmt.Errorf("[%s] Failed to get transactions for master address: %w",
 			ton.NetworkCode, err)
 	}
@@ -584,21 +566,14 @@ func (ton *Ton) GetInboundTransactions(ctx context.Context) ([]*InboundTransacti
 				}
 
 				// Get token name by contract address (jetton master address)
-				token, err := config.GetTokenByContractAddr(ton.NetworkCode, jettonMasterAddr.String())
-				if err != nil {
+				token, ok := config.GetTokenByContractAddr(ton.NetworkCode, jettonMasterAddr.String())
+				if !ok {
 					log.Printf("[%s] Unknown jetton master address '%s'", ton.NetworkCode, jettonMasterAddr.String())
 					continue
 				}
 
-				// Get decimals from config
-				decimals, err := config.GetChainSetting[int](
-					config.TokenSettings,
-					fmt.Sprintf("%s.%s.decimals", ton.NetworkCode, token),
-				)
-				if err != nil {
-					log.Printf("[%s] Failed to get %s decimals: %v", ton.NetworkCode, token, err)
-					continue
-				}
+				// Get token decimals from config
+				decimals := config.TokenSettings[ton.NetworkCode][token].Decimals
 
 				jettonInfo = &JettonInfo{
 					masterAddr: jettonMasterAddr,
@@ -640,76 +615,6 @@ func (ton *Ton) GetInboundTransactions(ctx context.Context) ([]*InboundTransacti
 
 	log.Printf("[%s] Processing finished successfully, found %d user transactions", ton.NetworkCode, len(inboundTxList))
 	return inboundTxList, nil
-}
-
-/* GetUserWallet private methods group */
-// @private deriveAddress Derive HD-wallet address by derivation index from master wallet private key
-// masterPrivateKey: Master wallet private key
-// userId: Unique user id for derivation index
-// Returns: Derived address
-func (ton *Ton) deriveAddress(masterPrivateKey string, userId uint32) (string, error) {
-	// Get seed bytes from private key
-	seed, err := hex.DecodeString(masterPrivateKey)
-	if err != nil {
-		return "", fmt.Errorf("invalid master key format: %w", err)
-	}
-
-	// Derive private key
-	privateKey, _ := ton.deriveEd25519Key(seed, userId)
-
-	// Create new wallet instance from private key
-	w, err := wallet.FromPrivateKey(nil, privateKey, ton.WalletVersion)
-	if err != nil {
-		return "", fmt.Errorf("failed to create wallet: %w", err)
-	}
-
-	// Get address
-	return w.WalletAddress().String(), nil
-}
-
-// @private deriveEd25519Key Ton Ed25519 keys derivation
-// seed: Seed bytes from private key
-// userId: Unique user id for derivation index
-// Returns: Address in Ton Ed25519 format
-func (ton *Ton) deriveEd25519Key(seed []byte, userId uint32) (ed25519.PrivateKey, ed25519.PublicKey) {
-	// Init master HD key for BIP32-Ed25519
-	mac := hmac.New(sha512.New, []byte("ed25519 seed"))
-	mac.Write(seed)
-	result := mac.Sum(nil)
-
-	key := result[:32]
-	chainCode := result[32:]
-
-	// Ton uses derivation scheme based on HMAC-SHA512
-	// Derivation path: m/44'/607'/0'/0'/{userId}'
-	path := []uint32{
-		0x8000002C,          // 44'
-		0x8000025F,          // 607' (TON coin type)
-		0x80000000,          // 0'
-		0x80000000,          // 0'
-		0x80000000 + userId, // {userId}'
-	}
-
-	// Apply HMAC-SHA512 for each path level
-	for _, index := range path {
-		data := make([]byte, 37)
-		data[0] = 0x00 // for hardened derivation
-		copy(data[1:33], key)
-		binary.BigEndian.PutUint32(data[33:], index)
-
-		hmacHash := hmac.New(sha512.New, chainCode)
-		hmacHash.Write(data)
-		result := hmacHash.Sum(nil)
-
-		key = result[:32]
-		chainCode = result[32:]
-	}
-
-	// Create Ed25519 keys from the received seed
-	privateKey := ed25519.NewKeyFromSeed(key)
-	publicKey := privateKey.Public().(ed25519.PublicKey)
-
-	return privateKey, publicKey
 }
 
 /* GetMasterWallet private methods group */
@@ -759,14 +664,7 @@ func (ton *Ton) getJettonBalance(currency, contractAddr, walletAddr string) (flo
 	}
 
 	// Get jetton decimals from config
-	decimals, err := config.GetChainSetting[int](
-		config.TokenSettings,
-		fmt.Sprintf("%s.%s.decimals", ton.NetworkCode, currency),
-	)
-	if err != nil {
-		return 0, fmt.Errorf("failed to get %s decimals: %w", currency, err)
-	}
-
+	decimals := config.TokenSettings[ton.NetworkCode][currency].Decimals
 	// Return converted balance
 	return strconv.ParseFloat(tlb.MustFromDecimal(jettonBalance.String(), decimals).String(), 64)
 }
@@ -820,12 +718,9 @@ func (ton *Ton) calcJettonFee(walletInstance *wallet.Wallet, currency, toAddr st
 	currency = strings.ToUpper(currency)
 
 	// Get token contract address
-	contractAddr, err := config.GetChainSetting[string](
-		config.ContractsAddresses,
-		fmt.Sprintf("%s.%s", ton.NetworkCode, currency),
-	)
-	if err != nil {
-		return 0, fmt.Errorf("failed to get contract address: %w", err)
+	contractAddr, ok := config.GetContractAddress(ton.NetworkCode, currency)
+	if !ok {
+		return 0, fmt.Errorf("contract address not found: %s/%s", ton.NetworkCode, currency)
 	}
 
 	// Get master jetton client
@@ -838,31 +733,11 @@ func (ton *Ton) calcJettonFee(walletInstance *wallet.Wallet, currency, toAddr st
 	}
 
 	// Get forward fee and message fee from config
-	forwardTon, err := config.GetChainSetting[string](
-		config.NetworkSettings,
-		fmt.Sprintf("%s.forward_fee", ton.NetworkCode),
-	)
-	if err != nil {
-		return 0, fmt.Errorf("failed to get forward fee amount: %w", err)
-	}
-	messageTon, err := config.GetChainSetting[string](
-		config.NetworkSettings,
-		fmt.Sprintf("%s.message_fee", ton.NetworkCode),
-	)
-	if err != nil {
-		return 0, fmt.Errorf("failed to get message fee amount: %w", err)
-	}
-	forwardTonAmount := tlb.MustFromTON(forwardTon)
-	messageTonAmount := tlb.MustFromTON(messageTon)
+	forwardTonAmount := tlb.MustFromTON(config.NetworkSettings[ton.NetworkCode].ForwardFee)
+	messageTonAmount := tlb.MustFromTON(config.NetworkSettings[ton.NetworkCode].MessageFee)
 
 	// Get jetton decimals from config
-	decimals, err := config.GetChainSetting[int](
-		config.TokenSettings,
-		fmt.Sprintf("%s.%s.decimals", ton.NetworkCode, currency),
-	)
-	if err != nil {
-		return 0, fmt.Errorf("failed to get %s decimals: %w", currency, err)
-	}
+	decimals := config.TokenSettings[ton.NetworkCode][currency].Decimals
 	// Get converted amount
 	amountConverted := tlb.MustFromDecimal(strconv.FormatFloat(amount, 'f', -1, 64), decimals)
 
@@ -908,17 +783,14 @@ func (ton *Ton) calcJettonFee(walletInstance *wallet.Wallet, currency, toAddr st
 // Returns: Total fee in TON
 func (ton *Ton) sendCalcFeeRequest(fromAddr *address.Address, extMessage *tlb.ExternalMessage) (float64, error) {
 	// Load config
-	cfg, err := config.Load()
-	if err != nil {
-		return 0, fmt.Errorf("failed to load config: %w", err)
-	}
+	cfg, _ := config.Load()
 
 	// Convert message to BOC in base64
 	bocBase64 := base64.StdEncoding.EncodeToString(extMessage.Body.ToBOC())
 
 	// Build request body
 	reqBody, err := json.Marshal(map[string]any{
-		"address":       fromAddr,
+		"address":       fromAddr.String(),
 		"body":          bocBase64,
 		"ignore_chksig": true,
 	})
@@ -926,17 +798,18 @@ func (ton *Ton) sendCalcFeeRequest(fromAddr *address.Address, extMessage *tlb.Ex
 		return 0, fmt.Errorf("failed to marshal request body: %w", err)
 	}
 
-	// Create HTTP request with timeout
+	// Create HTTP request entity with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	url := cfg.TonHttpUrl + "/" + cfg.QuickNodeApiKey + "/estimateFee"
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(reqBody))
+	httpReq, err := http.NewRequestWithContext(
+		ctx, "POST", cfg.TonHttpUrl+"/"+cfg.QuickNodeApiKey+"/estimateFee", bytes.NewReader(reqBody),
+	)
 	if err != nil {
 		return 0, fmt.Errorf("failed to build http request: %w", err)
 	}
 
-	// Set headers
+	// Set request headers
 	httpReq.Header.Set("Accept", "application/json")
 	httpReq.Header.Set("Content-Type", "application/json")
 
@@ -952,13 +825,7 @@ func (ton *Ton) sendCalcFeeRequest(fromAddr *address.Address, extMessage *tlb.Ex
 		return 0, fmt.Errorf("estimate fee request failed with status: %d", response.StatusCode)
 	}
 
-	// Read response body
-	respBody, err := io.ReadAll(response.Body)
-	if err != nil {
-		return 0, fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	// Parse response
+	// Read and parse response body
 	var respData struct {
 		Result struct {
 			SourceFees struct {
@@ -969,15 +836,15 @@ func (ton *Ton) sendCalcFeeRequest(fromAddr *address.Address, extMessage *tlb.Ex
 			} `json:"source_fees"`
 		} `json:"result"`
 	}
-	if err = json.Unmarshal(respBody, &respData); err != nil {
-		return 0, fmt.Errorf("failed to unmarshal response body: %w", err)
+	if err := json.NewDecoder(response.Body).Decode(&respData); err != nil {
+		return 0, fmt.Errorf("failed to decode response: %w", err)
 	}
 
 	// Calc total fee
 	fees := respData.Result.SourceFees
-	total := tlb.FromNanoTON(big.NewInt(int64(fees.InFwdFee + fees.StorageFee + fees.GasFee + fees.FwdFee))).String()
+	totalNano := fees.InFwdFee + fees.StorageFee + fees.GasFee + fees.FwdFee
 
-	// Parse total fee
+	total := tlb.FromNanoTON(big.NewInt(int64(totalNano))).String()
 	totalFloat, err := strconv.ParseFloat(total, 64)
 	if err != nil {
 		return 0, fmt.Errorf("failed to parse total fee: %w", err)
@@ -1035,12 +902,9 @@ func (ton *Ton) sendJetton(currency string, walletInstance *wallet.Wallet, toAdd
 	currency = strings.ToUpper(currency)
 
 	// Get token contract address from config
-	contractAddr, err := config.GetChainSetting[string](
-		config.ContractsAddresses,
-		fmt.Sprintf("%s.%s", ton.NetworkCode, currency),
-	)
-	if err != nil {
-		return "", fmt.Errorf("failed to get contract address: %w", err)
+	contractAddr, ok := config.GetContractAddress(ton.NetworkCode, currency)
+	if !ok {
+		return "", fmt.Errorf("contract address not found: %s/%s", ton.NetworkCode, currency)
 	}
 
 	// Get jetton master client
@@ -1052,34 +916,14 @@ func (ton *Ton) sendJetton(currency string, walletInstance *wallet.Wallet, toAdd
 		return "", fmt.Errorf("failed to get sender jetton wallet: %w", err)
 	}
 
+	// Get forward fee and message fee from config
+	forwardTonAmount := tlb.MustFromTON(config.NetworkSettings[ton.NetworkCode].ForwardFee)
+	messageTonAmount := tlb.MustFromTON(config.NetworkSettings[ton.NetworkCode].MessageFee)
+
 	// Get jetton decimals from config
-	decimals, err := config.GetChainSetting[int](
-		config.TokenSettings,
-		fmt.Sprintf("%s.%s.decimals", ton.NetworkCode, currency),
-	)
-	if err != nil {
-		return "", fmt.Errorf("failed to get %s decimals: %w", currency, err)
-	}
+	decimals := config.TokenSettings[ton.NetworkCode][currency].Decimals
 	// Get converted amount
 	amountConverted := tlb.MustFromDecimal(strconv.FormatFloat(amount, 'f', -1, 64), decimals)
-
-	// Get forward fee and message fee from config
-	forwardTon, err := config.GetChainSetting[string](
-		config.NetworkSettings,
-		fmt.Sprintf("%s.forward_fee", ton.NetworkCode),
-	)
-	if err != nil {
-		return "", fmt.Errorf("failed to get forward fee amount: %w", err)
-	}
-	messageTon, err := config.GetChainSetting[string](
-		config.NetworkSettings,
-		fmt.Sprintf("%s.message_fee", ton.NetworkCode),
-	)
-	if err != nil {
-		return "", fmt.Errorf("failed to get message fee amount: %w", err)
-	}
-	forwardTonAmount := tlb.MustFromTON(forwardTon)
-	messageTonAmount := tlb.MustFromTON(messageTon)
 
 	// Build forward payload (with comment)
 	var forwardPayload *cell.Cell

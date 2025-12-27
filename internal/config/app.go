@@ -1,7 +1,7 @@
 package config
 
 import (
-	"log"
+	"cmp"
 	"os"
 	"strconv"
 
@@ -38,8 +38,6 @@ type Config struct {
 	VaultPort     string
 	VaultRoleId   string
 	VaultSecretId string
-	VaultScheme   string
-	VaultToken    string
 	// NATS
 	NatsHost     string
 	NatsPort     string
@@ -55,7 +53,10 @@ type Config struct {
 	AmlApiUrl    string
 	AmlApiKey    string
 	AmlApiSecret string
-	AmlCheckCost string
+	AmlCheckCost float64
+	AmlThreshold float64
+	// Rates
+	RatesApiUrl string
 	// QuickNode
 	QuickNodeApiKey string
 	QuickNodeRps    int
@@ -98,7 +99,7 @@ func Load() (*Config, error) {
 		// Redis
 		RedisHost:                getEnv("REDIS_HOST", "localhost"),
 		RedisPort:                getEnv("REDIS_PORT", "6379"),
-		RedisDatabase:            getEnvAsInt("REDIS_DB", 2),
+		RedisDatabase:            getEnvInt("REDIS_DB", 2),
 		RedisPassword:            getEnv("REDIS_PASSWORD", ""),
 		RedisBybitReqsKey:        getEnv("REDIS_BYBIT_REQUESTS_KEY", ""),
 		RedisBybitWithdrawalsKey: getEnv("REDIS_BYBIT_WITHDRAWALS_KEY", ""),
@@ -109,8 +110,6 @@ func Load() (*Config, error) {
 		VaultPort:     getEnv("VAULT_PORT", ""),
 		VaultRoleId:   getEnv("VAULT_ROLE_ID", ""),
 		VaultSecretId: getEnv("VAULT_SECRET_ID", ""),
-		VaultScheme:   getEnv("VAULT_SCHEME", "http"),
-		VaultToken:    getEnv("VAULT_SCHEME", ""),
 		// NATS
 		NatsHost:     getEnv("NATS_HOST", "localhost"),
 		NatsPort:     getEnv("NATS_PORT", "4222"),
@@ -126,10 +125,13 @@ func Load() (*Config, error) {
 		AmlApiUrl:    getEnv("AML_API_URL", ""),
 		AmlApiKey:    getEnv("AML_API_KEY", ""),
 		AmlApiSecret: getEnv("AML_API_SECRET", ""),
-		AmlCheckCost: getEnv("AML_CHECK_COST", "0"),
+		AmlCheckCost: getEnvFloat("AML_CHECK_COST", 0),
+		AmlThreshold: getEnvFloat("AML_THRESHOLD", 0),
+		// Rates
+		RatesApiUrl: getEnv("RATES_API_URL", ""),
 		// QuickNode
 		QuickNodeApiKey: getEnv("QUICKNODE_API_KEY", ""),
-		QuickNodeRps:    getEnvAsInt("QUICKNODE_RPS", 15),
+		QuickNodeRps:    getEnvInt("QUICKNODE_RPS", 15),
 		// Chains
 		TronRpcUrl:   getEnv("TRON_RPC_URL", ""),
 		EthRpcUrl:    getEnv("ETH_RPC_URL", ""),
@@ -143,24 +145,23 @@ func Load() (*Config, error) {
 	}, nil
 }
 
-// getEnv Get string value of the env variable named by the key
+// getEnv Get string value of env variable by key
 func getEnv(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
+	return cmp.Or(os.Getenv(key), defaultValue)
+}
 
+// getEnvInt Get value of env variable parsed to int
+func getEnvInt(key string, defaultValue int) int {
+	if v, err := strconv.Atoi(os.Getenv(key)); err == nil {
+		return v
+	}
 	return defaultValue
 }
 
-// getEnvAsInt Get value of the env variable parsed to int
-func getEnvAsInt(key string, defaultValue int) int {
-	if value := os.Getenv(key); value != "" {
-		if intValue, err := strconv.Atoi(value); err == nil {
-			return intValue
-		} else {
-			log.Printf("Invalid number value for %s: %s", key, value)
-		}
+// getEnvFloat Get value of env variable parsed to float
+func getEnvFloat(key string, defaultValue float64) float64 {
+	if v, err := strconv.ParseFloat(os.Getenv(key), 64); err == nil {
+		return v
 	}
-
 	return defaultValue
 }

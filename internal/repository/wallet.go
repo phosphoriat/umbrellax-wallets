@@ -50,7 +50,7 @@ func (r *WalletRepository) GetAddressListByNetwork(network string) (map[string]u
 }
 
 // GetAddressByUserId Get address by user id
-func (r *WalletRepository) GetAddressByUserId(userId int) (string, error) {
+func (r *WalletRepository) GetAddressByUserId(userId uint) (string, error) {
 	var wallet models.Wallet
 
 	err := r.db.Where("user_id = ?", userId).
@@ -63,7 +63,7 @@ func (r *WalletRepository) GetAddressByUserId(userId int) (string, error) {
 }
 
 // GetUserIdByAddress Get user id by address
-func (r *WalletRepository) GetUserIdByAddress(address string) (uint32, error) {
+func (r *WalletRepository) GetUserIdByAddress(address string) (uint, error) {
 	var wallet models.Wallet
 
 	err := r.db.Where("address = ?", address).
@@ -72,7 +72,7 @@ func (r *WalletRepository) GetUserIdByAddress(address string) (uint32, error) {
 		return 0, err
 	}
 
-	return uint32(wallet.UserId), nil
+	return wallet.UserId, nil
 }
 
 // Create new wallet

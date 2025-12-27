@@ -18,7 +18,7 @@ func NewWalletsService(walletRepo *repository.WalletRepository) *WalletsService 
 }
 
 // GetUserWallet Get user HD-wallet by user id
-func (s *WalletsService) GetUserWallet(userId int, network string) (string, error) {
+func (s *WalletsService) GetUserWallet(userId uint, network string) (string, error) {
 	// Check if address exists in DB
 	existingAddress, err := s.walletRepo.GetAddressByUserId(userId)
 	if err == nil && existingAddress != "" {
@@ -32,14 +32,14 @@ func (s *WalletsService) GetUserWallet(userId int, network string) (string, erro
 	}
 
 	// Generate new address
-	address, err := chainService.GetUserWallet(userId)
+	address, err := chainService.GetUserWallet(uint32(userId))
 	if err != nil {
 		return "", err
 	}
 
 	// Save address in DB, if not exists
 	_, err = s.walletRepo.Create(&models.Wallet{
-		UserId:  uint(userId),
+		UserId:  userId,
 		Network: network,
 		Address: address,
 	})

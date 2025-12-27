@@ -14,8 +14,8 @@ type RefillsTask struct {
 func NewRefillsTask() *RefillsTask {
 	return &RefillsTask{
 		BaseTask: BaseTask{
-			maxRetries:  5,
-			timeout:     60 * time.Second,
+			maxRetries:  3,
+			timeout:     10 * time.Minute,
 			name:        "refills",
 			description: "Process refills",
 		},

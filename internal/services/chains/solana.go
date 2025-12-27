@@ -27,6 +27,8 @@ import (
 	"github.com/gagliardetto/solana-go/programs/system"
 	"github.com/gagliardetto/solana-go/programs/token"
 	"github.com/gagliardetto/solana-go/rpc"
+	"github.com/tyler-smith/go-bip39"
+	"golang.org/x/sync/semaphore"
 	"golang.org/x/time/rate"
 )
 
@@ -60,15 +62,15 @@ func newSolana() *Solana {
 	// Create new RPC client
 	client := rpc.New(cfg.SolRpcUrl + "/" + cfg.QuickNodeApiKey)
 
-	networkCode := "solana"
 	// Get network settings
-	networkSettings := config.NetworkSettings[networkCode].(map[string]any)
+	networkCode := "solana"
+	nativeToken := config.NetworkSettings[networkCode].NativeToken
 
 	return &Solana{
 		BaseChainService: BaseChainService{
 			WalletRepo:  repository.NewWalletRepository(),
 			NetworkCode: networkCode,
-			NativeToken: networkSettings["native_token"].(string),
+			NativeToken: nativeToken,
 		},
 		Client:        client,
 		RateLimit:     cfg.QuickNodeRps,
@@ -83,34 +85,40 @@ func (sol *Solana) GetCode() string {
 
 // GetUserWallet Get user HD-wallet by user id
 // userId: Unique user id
-func (sol *Solana) GetUserWallet(userId int) (string, error) {
+func (sol *Solana) GetUserWallet(userId uint32) (string, error) {
 	// Get master wallet data from Vault
-	masterData, err := vault.GetClient().GetSecret("/master/" + sol.NetworkCode)
+	masterData, err := vault.GetClient().GetSecret("master/" + sol.NetworkCode)
 	if err != nil {
 		return "", fmt.Errorf("failed to get master data: %w", err)
 	}
-
-	// Derive user address from master private key
-	derivedAddr, err := sol.deriveAddress(masterData["privateKey"].(string), uint32(userId))
-	if err != nil {
-		return "", err
+	mnemonic, ok := masterData["mnemonic"].(string)
+	if !ok || mnemonic == "" {
+		return "", fmt.Errorf("mnemonic not found in Vault")
 	}
 
-	return derivedAddr, nil
+	addr, _, err := sol.deriveWallet(mnemonic, userId)
+	if err != nil {
+		return "", fmt.Errorf("failed to derive address for user %d: %w", userId, err)
+	}
+
+	return addr, nil
 }
 
 // GetMasterWallet Get master wallet info (address and token balances)
 func (sol *Solana) GetMasterWallet() (map[string]any, error) {
 	// Get master wallet address from Vault
-	masterData, err := vault.GetClient().GetSecret("/master/" + sol.NetworkCode)
+	masterData, err := vault.GetClient().GetSecret("master/" + sol.NetworkCode)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get master data: %w", err)
 	}
-	masterAddr := masterData["address"].(string)
+	masterAddr, ok := masterData["address"].(string)
+	if !ok || masterAddr == "" {
+		return nil, fmt.Errorf("master address not found in Vault")
+	}
 
 	// Get SPL token balances
 	balances := make(map[string]any)
-	for tokenName, contractAddr := range config.ContractsAddresses[sol.NetworkCode].(map[string]string) {
+	for tokenName, contractAddr := range config.ContractsAddresses[sol.NetworkCode] {
 		tokenBalance, _ := sol.getSplBalance(contractAddr, masterAddr)
 		balances[tokenName] = tokenBalance
 	}
@@ -134,35 +142,20 @@ func (sol *Solana) GetMasterWallet() (map[string]any, error) {
 // amount: Amount in float value
 // memo: Memo tag
 // Returns: Map of all fee types (chain_fee, bybit_fee, aml_fee)
-func (sol *Solana) GetTransactionCommission(oType, wType string, wId *string, currency, toAddr string, amount float64, memo string) (map[string]float64, error) {
-	var walletPath string
-	if wType == "master" {
-		walletPath = "/master/" + sol.NetworkCode
-	} else {
-		if wId == nil {
-			return nil, fmt.Errorf("wId is required")
-		}
-		walletPath = fmt.Sprintf("/users/%s/%s", *wId, sol.NetworkCode)
-	}
-
-	// Get wallet data from Vault
-	walletData, err := vault.GetClient().GetSecret(walletPath)
+func (sol *Solana) GetTransactionCommission(oType, wType string, wId *uint32, currency, toAddr string, amount float64, memo string) (map[string]float64, error) {
+	// Get wallet address by type and id
+	walletAddr, _, err := sol.getWallet(wType, wId)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get wallet data: %w", err)
-	}
-	// Extract wallet address
-	fromAddr, ok := walletData["address"].(string)
-	if !ok || fromAddr == "" {
-		return nil, fmt.Errorf("invalid or missing %s wallet address in Vault", sol.NetworkCode)
+		return nil, err
 	}
 
 	// Calc chain fee for currency (in SOL value)
 	var chainFee float64
 	switch currency {
 	case "SOL":
-		chainFee, err = sol.calcNativeFee(fromAddr, toAddr, amount)
+		chainFee, err = sol.calcNativeFee(walletAddr, toAddr, amount)
 	default:
-		chainFee, err = sol.calcSplFee(currency, fromAddr, toAddr, amount)
+		chainFee, err = sol.calcSplFee(currency, walletAddr, toAddr, amount)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get transaction commission: %w", err)
@@ -170,12 +163,13 @@ func (sol *Solana) GetTransactionCommission(oType, wType string, wId *string, cu
 
 	var bybitFee, amlFee float64
 	if oType == "withdrawal" {
-		// Get bybit withdrawal fee (in currency value)
-		bybitFee, _ = bybit.GetHTTPClient().GetWithdrawalFee(currency, sol.NetworkCode)
-
-		// Get AML check cost from config (in USD value)
+		// Load config
 		cfg, _ := config.Load()
-		amlFee, _ = strconv.ParseFloat(cfg.AmlCheckCost, 64)
+
+		// Get bybit withdrawal fee (in currency value)
+		bybitFee, _ = bybit.GetClient().GetWithdrawalFee(context.Background(), currency, sol.NetworkCode)
+		// Get AML check cost from config (in USD value)
+		amlFee = cfg.AmlCheckCost
 	}
 
 	return map[string]float64{
@@ -236,36 +230,20 @@ func (sol *Solana) GetTransactionStatus(hash, toAddr string) (string, error) {
 // amount: Amount in float value
 // memo: Memo tag
 // Returns: Transaction hash
-func (sol *Solana) SendTransaction(wType string, wId *string, currency, toAddr string, amount float64, memo string) (string, error) {
-	var walletPath string
-	if wType == "master" {
-		walletPath = fmt.Sprintf("/master/%s", sol.NetworkCode)
-	} else {
-		if wId == nil {
-			return "", fmt.Errorf("wId is required")
-		}
-		walletPath = fmt.Sprintf("/users/%s/%s", *wId, sol.NetworkCode)
-	}
-
-	// Get wallet data from Vault
-	walletData, err := vault.GetClient().GetSecret(walletPath)
+func (sol *Solana) SendTransaction(wType string, wId *uint32, currency, toAddr string, amount float64, memo string) (string, error) {
+	// Get wallet address and private key by type and id
+	walletAddr, walletKey, err := sol.getWallet(wType, wId)
 	if err != nil {
-		return "", fmt.Errorf("failed to get wallet data: %w", err)
-	}
-	// Extract wallet address and private key
-	fromAddr, okF := walletData["address"].(string)
-	privateKey, okP := walletData["privateKey"].(string)
-	if !okF || !okP || fromAddr == "" {
-		return "", fmt.Errorf("invalid or missing %s wallet data in Vault", sol.NetworkCode)
+		return "", err
 	}
 
 	// Send new transaction on chain and get transaction hash
 	var hash string
 	switch currency {
 	case "SOL":
-		hash, err = sol.sendNative(fromAddr, toAddr, amount, privateKey)
+		hash, err = sol.sendNative(walletAddr, toAddr, amount, walletKey)
 	default:
-		hash, err = sol.sendSpl(currency, fromAddr, toAddr, amount, privateKey)
+		hash, err = sol.sendSpl(currency, walletAddr, toAddr, amount, walletKey)
 	}
 
 	if err != nil {
@@ -323,13 +301,7 @@ func (sol *Solana) GetInboundTransactions(ctx context.Context) ([]*InboundTransa
 	}
 
 	// Get SOL decimals from config
-	solDecimals, err := config.GetChainSetting[int](
-		config.TokenSettings,
-		fmt.Sprintf("%s.%s.decimals", sol.NetworkCode, "SOL"),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("[%s] Failed to get SOL decimals from config: %w", sol.NetworkCode, err)
-	}
+	solDecimals := config.TokenSettings[sol.NetworkCode]["SOL"].Decimals
 
 	// Get all new blocks list
 	if err := limiter.Wait(ctx); err != nil {
@@ -346,14 +318,24 @@ func (sol *Solana) GetInboundTransactions(ctx context.Context) ([]*InboundTransa
 	log.Printf("[%s] Processing transactions for %d user addresses from block %d to %d",
 		sol.NetworkCode, len(addressList), lastBlockNumber+1, currentBlockNum)
 
-	// Wait group to wait for all tx blocks goroutines to complete
-	var wg sync.WaitGroup
-	// Concurrent save map for successfully processed blocks
-	successfulBlocks := &sync.Map{}
-	// Channel for collect transactions from all blocks
-	resultChan := make(chan []*InboundTransaction, len(blocks))
-	// Flag for getting versioned transactions
-	version := uint64(0)
+	var (
+		// Flag for getting versioned transactions
+		version = uint64(0)
+		// Wait group to wait for all tx blocks goroutines to complete
+		wg sync.WaitGroup
+		// Semaphore for goroutines limit
+		sem = semaphore.NewWeighted(40)
+		// Concurrent save map for successfully processed blocks
+		successfulBlocks = &sync.Map{}
+		// Channel for collect transactions from all blocks
+		resultChan = make(chan []*InboundTransaction, currentBlockNum-lastBlockNumber)
+		// Goroutines cancellation context
+		cancelCtx, cancel = context.WithCancel(ctx)
+		// First error flag
+		errOnce  sync.Once
+		firstErr error
+	)
+	defer cancel()
 
 	// Process all new blocks in separate goroutines
 	for _, blockNum := range blocks {
@@ -362,12 +344,23 @@ func (sol *Solana) GetInboundTransactions(ctx context.Context) ([]*InboundTransa
 		go func() {
 			defer wg.Done()
 
+			// Check context cancellation
+			if cancelCtx.Err() != nil {
+				return
+			}
+
+			// Parallel execution limit
+			if err := sem.Acquire(cancelCtx, 1); err != nil {
+				return
+			}
+			defer sem.Release(1)
+
 			// Get block entity
-			if err := limiter.Wait(ctx); err != nil {
+			if err := limiter.Wait(cancelCtx); err != nil {
 				log.Printf("[%s] Rate limit error for block %d: %v", sol.NetworkCode, blockNum, err)
 				return
 			}
-			block, err := sol.Client.GetBlockWithOpts(ctx, blockNum, &rpc.GetBlockOpts{
+			block, err := sol.Client.GetBlockWithOpts(cancelCtx, blockNum, &rpc.GetBlockOpts{
 				Encoding:                       solana.EncodingBase64,
 				Commitment:                     rpc.CommitmentFinalized,
 				TransactionDetails:             rpc.TransactionDetailsFull,
@@ -375,10 +368,15 @@ func (sol *Solana) GetInboundTransactions(ctx context.Context) ([]*InboundTransa
 			})
 			if err != nil {
 				log.Printf("[%s] Failed to get block %d: %v", sol.NetworkCode, blockNum, err)
+				// Cancel all another goroutines
+				errOnce.Do(func() {
+					firstErr = err
+					cancel()
+				})
 				return
 			}
 
-			log.Printf("[%s] Processing block %d with raw %d transactions",
+			log.Printf("[%s] Processing block %d with %d raw transactions",
 				sol.NetworkCode, blockNum, len(block.Transactions))
 
 			// Local goroutine tx list
@@ -507,12 +505,12 @@ func (sol *Solana) GetInboundTransactions(ctx context.Context) ([]*InboundTransa
 						}
 						// Fallback to RPC, if receiver not found in metadata
 						if !found {
-							if err := limiter.Wait(ctx); err != nil {
+							if err := limiter.Wait(cancelCtx); err != nil {
 								return
 							}
 
 							// Get account info
-							destAccountInfo, err := sol.Client.GetAccountInfo(ctx, destTokenAccountKey)
+							destAccountInfo, err := sol.Client.GetAccountInfo(cancelCtx, destTokenAccountKey)
 							if err != nil || destAccountInfo == nil || destAccountInfo.Value == nil {
 								continue
 							}
@@ -534,8 +532,8 @@ func (sol *Solana) GetInboundTransactions(ctx context.Context) ([]*InboundTransa
 						}
 
 						// Get token symbol from config
-						tokenSymbol, err := config.GetTokenByContractAddr(sol.NetworkCode, mintAddr)
-						if err != nil {
+						tokenSymbol, ok := config.GetTokenByContractAddr(sol.NetworkCode, mintAddr)
+						if !ok {
 							continue
 						}
 
@@ -545,13 +543,13 @@ func (sol *Solana) GetInboundTransactions(ctx context.Context) ([]*InboundTransa
 						sol.decimalsCacheMu.RUnlock()
 						// Fetch data from contract
 						if !exists {
-							if err := limiter.Wait(ctx); err != nil {
+							if err := limiter.Wait(cancelCtx); err != nil {
 								return
 							}
 
 							// Get contract data
 							mintPubKey, _ := solana.PublicKeyFromBase58(mintAddr)
-							mintAccount, err := sol.Client.GetAccountInfo(ctx, mintPubKey)
+							mintAccount, err := sol.Client.GetAccountInfo(cancelCtx, mintPubKey)
 							if err != nil || mintAccount == nil || mintAccount.Value == nil {
 								continue
 							}
@@ -583,12 +581,12 @@ func (sol *Solana) GetInboundTransactions(ctx context.Context) ([]*InboundTransa
 						}
 						// Fallback to RPC, if sender not found in metadata
 						if fromAddr == "" && int(sourceIdx) < len(msg.AccountKeys) {
-							if err := limiter.Wait(ctx); err != nil {
+							if err := limiter.Wait(cancelCtx); err != nil {
 								return
 							}
 
 							// Get sender token account info
-							sourceAccountInfo, err := sol.Client.GetAccountInfo(ctx, msg.AccountKeys[sourceIdx])
+							sourceAccountInfo, err := sol.Client.GetAccountInfo(cancelCtx, msg.AccountKeys[sourceIdx])
 							if err == nil && sourceAccountInfo != nil && sourceAccountInfo.Value != nil {
 								var sourceTokenData token.Account
 								// Parse token account data
@@ -640,6 +638,8 @@ func (sol *Solana) GetInboundTransactions(ctx context.Context) ([]*InboundTransa
 		if _, ok := successfulBlocks.Load(blockNum); ok {
 			lastContinuousBlock = blockNum
 		} else {
+			log.Printf("[%s] Block %d was not processed successfully, stopping at %d: %v",
+				sol.NetworkCode, blockNum, lastContinuousBlock, firstErr)
 			break
 		}
 	}
@@ -652,71 +652,90 @@ func (sol *Solana) GetInboundTransactions(ctx context.Context) ([]*InboundTransa
 		}
 	}
 
-	log.Printf("[%s] Processing finished successfully, found %d user transactions", sol.NetworkCode, len(txList))
+	log.Printf("[%s] Processing finished successfully: processed %d blocks, found %d user transactions",
+		sol.NetworkCode, lastContinuousBlock-lastBlockNumber, len(txList))
 	return txList, nil
 }
 
 /* GetUserWallet private methods group */
-// @private deriveAddress Derive HD-wallet address by derivation index from master wallet private key
-// masterPrivateKey: Master wallet private key
-// userId: Unique user id for derivation index
-func (sol *Solana) deriveAddress(masterPrivateKey string, userId uint32) (string, error) {
-	// Get seed bytes from private key
-	seed, err := hex.DecodeString(masterPrivateKey)
+// @private getWallet Get HD-wallet by index
+// wType: Wallet type (master/user)
+// wId: User id (only for user wType)
+// Returns: Derived address and private key
+func (sol *Solana) getWallet(wType string, wId *uint32) (string, string, error) {
+	// Get master wallet data from Vault
+	masterData, err := vault.GetClient().GetSecret("master/" + sol.NetworkCode)
 	if err != nil {
-		return "", fmt.Errorf("invalid master key format: %w", err)
+		return "", "", fmt.Errorf("failed to get master data: %w", err)
+	}
+	mnemonic, ok := masterData["mnemonic"].(string)
+	if !ok || mnemonic == "" {
+		return "", "", fmt.Errorf("mnemonic not found in vault")
 	}
 
-	// Derive private key
-	_, publicKey := sol.deriveEd25519Key(seed, userId)
+	// Derive wallet address and private key from master mnemonic
+	var index uint32
+	if wType == "master" {
+		index = 0
+	} else {
+		if wId == nil {
+			return "", "", fmt.Errorf("user id is required")
+		}
+		index = *wId
+	}
 
-	// Create Solana wallet from public key
-	solanaPublicKey := solana.PublicKeyFromBytes(publicKey)
-
-	// Return the Solana address (base58 encoded)
-	return solanaPublicKey.String(), nil
+	return sol.deriveWallet(mnemonic, index)
 }
 
-// @private deriveEd25519Key Solana Ed25519 keys derivation
-func (sol *Solana) deriveEd25519Key(seed []byte, userId uint32) (ed25519.PrivateKey, ed25519.PublicKey) {
-	// Init master HD key for BIP32-Ed25519
+// @private deriveWallet Derive HD-wallet by derivation index from master wallet mnemonic
+// mnemonic: Master wallet mnemonic
+// userId: Unique user id for derivation index
+// Returns: Derived address and private key
+func (sol *Solana) deriveWallet(mnemonic string, userId uint32) (string, string, error) {
+	// Convert mnemonic to seed
+	seed := bip39.NewSeed(mnemonic, "")
+
+	// Init master HD key (BIP32-Ed25519)
 	mac := hmac.New(sha512.New, []byte("ed25519 seed"))
 	mac.Write(seed)
 	result := mac.Sum(nil)
 
-	key := result[:32]
-	chainCode := result[32:]
+	currentKey := result[:32]
+	currentChainCode := result[32:]
 
-	// Solana uses derivation scheme based on HMAC-SHA512
-	// Derivation path: m/44'/501'/0'/0'/{userId}'
+	// Solana derivation path: m/44'/501'/0'/0'/{userId}'
 	path := []uint32{
 		0x8000002C,          // 44'
-		0x800001F5,          // 501' (Solana coin type)
+		0x800001F5,          // 501'
 		0x80000000,          // 0'
 		0x80000000,          // 0'
 		0x80000000 + userId, // {userId}'
 	}
 
-	// Apply HMAC-SHA512 for each path level
+	// Derive child keys (all hardened for Ed25519)
 	for _, index := range path {
 		data := make([]byte, 37)
-		data[0] = 0x00 // for hardened derivation
-		copy(data[1:33], key)
+		data[0] = 0x00
+		copy(data[1:33], currentKey)
 		binary.BigEndian.PutUint32(data[33:], index)
 
-		hmacHash := hmac.New(sha512.New, chainCode)
-		hmacHash.Write(data)
-		result := hmacHash.Sum(nil)
+		h := hmac.New(sha512.New, currentChainCode)
+		h.Write(data)
+		result := h.Sum(nil)
 
-		key = result[:32]
-		chainCode = result[32:]
+		currentKey = result[:32]
+		currentChainCode = result[32:]
 	}
 
-	// Create Ed25519 keys from the received seed
-	privateKey := ed25519.NewKeyFromSeed(key)
+	// Create Ed25519 keys
+	privateKey := ed25519.NewKeyFromSeed(currentKey)
 	publicKey := privateKey.Public().(ed25519.PublicKey)
 
-	return privateKey, publicKey
+	// Create Solana address and private key (in base58)
+	solanaPublicKey := solana.PublicKeyFromBytes(publicKey)
+	solanaPrivateKey := solana.PrivateKey(privateKey)
+
+	return solanaPublicKey.String(), solanaPrivateKey.String(), nil
 }
 
 /* GetMasterWallet private methods group */
@@ -739,10 +758,7 @@ func (sol *Solana) getNativeBalance(addr string) (float64, error) {
 	}
 
 	// Get SOL decimals from config
-	solDecimals, _ := config.GetChainSetting[int](
-		config.TokenSettings,
-		fmt.Sprintf("%s.%s.decimals", sol.NetworkCode, "SOL"),
-	)
+	solDecimals := config.TokenSettings[sol.NetworkCode]["SOL"].Decimals
 	// Get converted balance (in SOL)
 	balance := utils.RemoveDecimals(big.NewInt(int64(result.Value)), int64(solDecimals))
 
@@ -841,14 +857,7 @@ func (sol *Solana) calcNativeFee(fromAddr, toAddr string, amount float64) (float
 	}
 
 	// Get SOL decimals from config
-	solDecimals, err := config.GetChainSetting[int](
-		config.TokenSettings,
-		fmt.Sprintf("%s.%s.decimals", sol.NetworkCode, "SOL"),
-	)
-	if err != nil {
-		return 0, fmt.Errorf("failed to get SOL decimals from config: %w", err)
-	}
-
+	solDecimals := config.TokenSettings[sol.NetworkCode]["SOL"].Decimals
 	// Get converted amount (in lamports)
 	lamports := utils.ApplyDecimals(amount, int64(solDecimals))
 
@@ -913,12 +922,9 @@ func (sol *Solana) calcSplFee(currency, fromAddr, toAddr string, amount float64)
 	}
 
 	// Get token contract address
-	contractAddr, err := config.GetChainSetting[string](
-		config.ContractsAddresses,
-		fmt.Sprintf("%s.%s", sol.NetworkCode, currency),
-	)
-	if err != nil {
-		return 0, fmt.Errorf("failed to get contract address for %s: %w", currency, err)
+	contractAddr, ok := config.GetContractAddress(sol.NetworkCode, currency)
+	if !ok {
+		return 0, fmt.Errorf("contract address not found in config: %s/%s", sol.NetworkCode, currency)
 	}
 
 	// Parse contract (mint) address
@@ -928,13 +934,7 @@ func (sol *Solana) calcSplFee(currency, fromAddr, toAddr string, amount float64)
 	}
 
 	// Get SOL decimals from config
-	solDecimals, err := config.GetChainSetting[int](
-		config.TokenSettings,
-		fmt.Sprintf("%s.%s.decimals", sol.NetworkCode, "SOL"),
-	)
-	if err != nil {
-		return 0, fmt.Errorf("failed to get SOL decimals: %w", err)
-	}
+	solDecimals := config.TokenSettings[sol.NetworkCode]["SOL"].Decimals
 
 	// Get token decimals from contract (mint)
 	mintAccount, err := sol.Client.GetAccountInfo(ctx, mintPubKey)
@@ -1074,14 +1074,7 @@ func (sol *Solana) sendNative(fromAddr, toAddr string, amount float64, privateKe
 	}
 
 	// Get SOL decimals from config
-	solDecimals, err := config.GetChainSetting[int](
-		config.TokenSettings,
-		fmt.Sprintf("%s.%s.decimals", sol.NetworkCode, "SOL"),
-	)
-	if err != nil {
-		return "", fmt.Errorf("failed to get SOL decimals: %w", err)
-	}
-
+	solDecimals := config.TokenSettings[sol.NetworkCode]["SOL"].Decimals
 	// Get converted amount (in lamports)
 	lamports := utils.ApplyDecimals(amount, int64(solDecimals))
 
@@ -1124,12 +1117,9 @@ func (sol *Solana) sendSpl(currency, fromAddr, toAddr string, amount float64, pr
 	currency = strings.ToUpper(currency)
 
 	// Get token contract address
-	contractAddr, err := config.GetChainSetting[string](
-		config.ContractsAddresses,
-		fmt.Sprintf("%s.%s", sol.NetworkCode, currency),
-	)
-	if err != nil {
-		return "", fmt.Errorf("failed to get contract address for %s: %w", currency, err)
+	contractAddr, ok := config.GetContractAddress(sol.NetworkCode, currency)
+	if !ok {
+		return "", fmt.Errorf("contract address not found in config: %s/%s", sol.NetworkCode, currency)
 	}
 
 	// Get SOL and token balances

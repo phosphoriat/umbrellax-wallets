@@ -1,157 +1,183 @@
 package config
 
-import (
-	"fmt"
-	"reflect"
+const ERC20ABI = `[{"inputs":[{"internalType":"address","name":"owner","type":"address"},{"internalType":"address","name":"spender","type":"address"}],"name":"allowance","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"spender","type":"address"},{"internalType":"uint256","name":"amount","type":"uint256"}],"name":"approve","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"account","type":"address"}],"name":"balanceOf","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"decimals","outputs":[{"internalType":"uint8","name":"","type":"uint8"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"name","outputs":[{"internalType":"string","name":"","type":"string"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"symbol","outputs":[{"internalType":"string","name":"","type":"string"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"totalSupply","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[{"internalType":"address","name":"recipient","type":"address"},{"internalType":"uint256","name":"amount","type":"uint256"}],"name":"transfer","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"internalType":"address","name":"sender","type":"address"},{"internalType":"address","name":"recipient","type":"address"},{"internalType":"uint256","name":"amount","type":"uint256"}],"name":"transferFrom","outputs":[{"internalType":"bool","name":"","type":"bool"}],"stateMutability":"nonpayable","type":"function"}]`
 
-	"wallets/internal/utils"
+type (
+	NetworkConfig struct {
+		NativeToken  string
+		BybitAddress string
+		FeeBuffer    float64
+		BlockTime    float64
+		ABI          string
+		ForwardFee   string
+		MessageFee   string
+	}
+
+	TokenConfig struct {
+		Decimals        int
+		EstimatedEnergy int
+	}
 )
 
-type ChainSettingValue interface {
-	~int | ~int64 | ~float64 | ~string
-}
-
 // ContractsAddresses Blockchain smart contract addresses list for every token
-var ContractsAddresses = map[string]any{
-	"tron": map[string]string{
+var ContractsAddresses = map[string]map[string]string{
+	"tron": {
 		"USDT": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
 	},
-
-	"ethereum": map[string]string{
+	"ethereum": {
 		"USDT": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
 		"USDC": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
 	},
-
-	"bsc": map[string]string{
+	"bsc": {
 		"USDT":     "0x55d398326f99059fF775485246999027B3197955",
 		"UMBRELLA": "0xf8ccF9F12f47DB271B1171be2E38B574f4050924",
 		"USDC":     "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d",
 	},
-
-	"ton": map[string]string{
+	"ton": {
 		"USDT": "EQCxE6mUtQJKFnGfaROTKOt1lZbDiiX1kCixRv7Nw2Id_sDs",
 	},
-
-	"solana": map[string]string{
+	"solana": {
 		"USDT": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
 		"USDC": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
 	},
 }
 
 // NetworkSettings Network settings
-var NetworkSettings = map[string]any{
-	"tron": map[string]any{
-		"native_token":  "TRX",
-		"bybit_address": "TVWE87Z75Hm6yeAFcYrZjkuanNKpq6eM3k",
-		"fee_buffer":    0.05,
+var NetworkSettings = map[string]NetworkConfig{
+	"tron": {
+		NativeToken:  "TRX",
+		BybitAddress: "TVWE87Z75Hm6yeAFcYrZjkuanNKpq6eM3k",
+		FeeBuffer:    0.05,
+		BlockTime:    3,
 	},
-	"ethereum": map[string]any{
-		"abi":           "[{\"inputs\":[{\"internalType\":\"address\",\"name\":\"owner\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"spender\",\"type\":\"address\"}],\"name\":\"allowance\",\"outputs\":[{\"internalType\":\"uint256\",\"name\":\"\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"spender\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"}],\"name\":\"approve\",\"outputs\":[{\"internalType\":\"bool\",\"name\":\"\",\"type\":\"bool\"}],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"account\",\"type\":\"address\"}],\"name\":\"balanceOf\",\"outputs\":[{\"internalType\":\"uint256\",\"name\":\"\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"decimals\",\"outputs\":[{\"internalType\":\"uint8\",\"name\":\"\",\"type\":\"uint8\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"name\",\"outputs\":[{\"internalType\":\"string\",\"name\":\"\",\"type\":\"string\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"symbol\",\"outputs\":[{\"internalType\":\"string\",\"name\":\"\",\"type\":\"string\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"totalSupply\",\"outputs\":[{\"internalType\":\"uint256\",\"name\":\"\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"recipient\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"}],\"name\":\"transfer\",\"outputs\":[{\"internalType\":\"bool\",\"name\":\"\",\"type\":\"bool\"}],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"sender\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"recipient\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"}],\"name\":\"transferFrom\",\"outputs\":[{\"internalType\":\"bool\",\"name\":\"\",\"type\":\"bool\"}],\"stateMutability\":\"nonpayable\",\"type\":\"function\"}]",
-		"native_token":  "ETH",
-		"bybit_address": "0x0182f8cff05f1554ccbc14cbe06c5a8973c85c31",
-		"fee_buffer":    0.1,
+	"ethereum": {
+		ABI:          ERC20ABI,
+		NativeToken:  "ETH",
+		BybitAddress: "0x0182f8cff05f1554ccbc14cbe06c5a8973c85c31",
+		FeeBuffer:    0.1,
+		BlockTime:    12,
 	},
-	"bsc": map[string]any{
-		"abi":           "[{\"inputs\":[{\"internalType\":\"address\",\"name\":\"owner\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"spender\",\"type\":\"address\"}],\"name\":\"allowance\",\"outputs\":[{\"internalType\":\"uint256\",\"name\":\"\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"spender\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"}],\"name\":\"approve\",\"outputs\":[{\"internalType\":\"bool\",\"name\":\"\",\"type\":\"bool\"}],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"account\",\"type\":\"address\"}],\"name\":\"balanceOf\",\"outputs\":[{\"internalType\":\"uint256\",\"name\":\"\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"decimals\",\"outputs\":[{\"internalType\":\"uint8\",\"name\":\"\",\"type\":\"uint8\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"name\",\"outputs\":[{\"internalType\":\"string\",\"name\":\"\",\"type\":\"string\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"symbol\",\"outputs\":[{\"internalType\":\"string\",\"name\":\"\",\"type\":\"string\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"totalSupply\",\"outputs\":[{\"internalType\":\"uint256\",\"name\":\"\",\"type\":\"uint256\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"recipient\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"}],\"name\":\"transfer\",\"outputs\":[{\"internalType\":\"bool\",\"name\":\"\",\"type\":\"bool\"}],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"sender\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"recipient\",\"type\":\"address\"},{\"internalType\":\"uint256\",\"name\":\"amount\",\"type\":\"uint256\"}],\"name\":\"transferFrom\",\"outputs\":[{\"internalType\":\"bool\",\"name\":\"\",\"type\":\"bool\"}],\"stateMutability\":\"nonpayable\",\"type\":\"function\"}]",
-		"native_token":  "BNB",
-		"bybit_address": "0x0182f8cff05f1554ccbc14cbe06c5a8973c85c31",
-		"fee_buffer":    0.05,
+	"bsc": {
+		ABI:          ERC20ABI,
+		NativeToken:  "BNB",
+		BybitAddress: "0x0182f8cff05f1554ccbc14cbe06c5a8973c85c31",
+		FeeBuffer:    0.05,
+		BlockTime:    1,
 	},
-	"ton": map[string]any{
-		"native_token":  "TON",
-		"bybit_address": "UQAjUG-ewikNc-uEtZLCM0DbxkV2SgCh27Wyf6-JzNexlrvG",
-		"fee_buffer":    0.05,
-		"forward_fee":   0.02,
-		"message_fee":   0.01,
+	"ton": {
+		NativeToken:  "TON",
+		BybitAddress: "UQAjUG-ewikNc-uEtZLCM0DbxkV2SgCh27Wyf6-JzNexlrvG",
+		FeeBuffer:    0.05,
+		ForwardFee:   "0.02",
+		MessageFee:   "0.01",
+		BlockTime:    5,
 	},
-	"bitcoin": map[string]any{
-		"native_token":  "BTC",
-		"bybit_address": "1E61LTQx5CRAwptFCJmAdzmbiXNCn1Ttat",
-		"fee_buffer":    0.05,
+	"bitcoin": {
+		NativeToken:  "BTC",
+		BybitAddress: "1E61LTQx5CRAwptFCJmAdzmbiXNCn1Ttat",
+		FeeBuffer:    0.05,
+		BlockTime:    600,
 	},
-	"solana": map[string]any{
-		"native_token":  "SOL",
-		"bybit_address": "4Ctt4Ud27BMP7aDfTBHrm1MD2Q6gGu7gBE3JJmPuQfBZ",
-		"fee_buffer":    0.05,
+	"solana": {
+		NativeToken:  "SOL",
+		BybitAddress: "4Ctt4Ud27BMP7aDfTBHrm1MD2Q6gGu7gBE3JJmPuQfBZ",
+		FeeBuffer:    0.05,
+		BlockTime:    1,
 	},
 }
 
 // TokenSettings Token settings for every network
 // For TON every token must have decimals, for other networks only native token
-var TokenSettings = map[string]any{
-	"tron": map[string]any{
-		"TRX": map[string]any{
-			"decimals":         6,
-			"estimated_energy": 0,
+var TokenSettings = map[string]map[string]TokenConfig{
+	"tron": {
+		"TRX": {
+			Decimals:        6,
+			EstimatedEnergy: 0,
 		},
-		"USDT": map[string]any{
-			"estimated_energy": 85000,
-		},
-	},
-	"ethereum": map[string]any{
-		"ETH": map[string]any{
-			"decimals": 18,
+		"USDT": {
+			EstimatedEnergy: 85000,
 		},
 	},
-	"bsc": map[string]any{
-		"BNB": map[string]any{
-			"decimals": 18,
+	"ethereum": {
+		"ETH": {
+			Decimals: 18,
 		},
 	},
-	"ton": map[string]any{
-		"TON": map[string]any{
-			"decimals": 9,
-		},
-		"USDT": map[string]any{
-			"decimals": 6,
+	"bsc": {
+		"BNB": {
+			Decimals: 18,
 		},
 	},
-	"bitcoin": map[string]any{
-		"BTC": map[string]any{
-			"decimals": 8,
+	"ton": {
+		"TON": {
+			Decimals: 9,
+		},
+		"USDT": {
+			Decimals: 6,
 		},
 	},
-	"solana": map[string]any{
-		"SOL": map[string]any{
-			"decimals": 9,
+	"bitcoin": {
+		"BTC": {
+			Decimals: 8,
+		},
+	},
+	"solana": {
+		"SOL": {
+			Decimals: 9,
 		},
 	},
 }
 
-// GetChainSetting Get chain setting from config
-// config: Config interface
-// path: Path in dot notation
-// Returns: Config value from given path
-func GetChainSetting[T ChainSettingValue](config map[string]any, path string) (T, error) {
-	var zero T
+// GetNetworkConfig Get network config
+// network: Network code
+// Returns: NetworkConfig struct
+func GetNetworkConfig(network string) (NetworkConfig, bool) {
+	cfg, ok := NetworkSettings[network]
+	return cfg, ok
+}
 
-	if value, ok := utils.DataGet(config, path); ok {
-		if result, ok := value.(T); ok {
-			return result, nil
-		} else {
-			return zero, fmt.Errorf("value at path '%s' has type '%T', expected '%s'",
-				path, value, reflect.TypeOf(zero).String())
-		}
-	} else {
-		return zero, fmt.Errorf("value at path '%s' does not exist", path)
+// GetTokenConfig Get token config
+// network: Network code
+// token: Token ticker
+// Returns: TokenConfig struct
+func GetTokenConfig(network, token string) (TokenConfig, bool) {
+	tokens, ok := TokenSettings[network]
+	if !ok {
+		return TokenConfig{}, false
 	}
+
+	cfg, ok := tokens[token]
+	return cfg, ok
+}
+
+// GetContractAddress Get contract address for token
+// network: Network code
+// token: Token ticker
+// Returns: Token contract address
+func GetContractAddress(network, token string) (string, bool) {
+	tokens, ok := ContractsAddresses[network]
+	if !ok {
+		return "", false
+	}
+
+	addr, ok := tokens[token]
+	return addr, ok
 }
 
 // GetTokenByContractAddr Get token name by network and contract address
 // network: Token network
 // contractAddr: Token contract address
-// Returns: Token name
-func GetTokenByContractAddr(network, contractAddr string) (string, error) {
-	networks, ok := ContractsAddresses[network]
+// Returns: Token ticker
+func GetTokenByContractAddr(network, contractAddr string) (string, bool) {
+	tokens, ok := ContractsAddresses[network]
 	if !ok {
-		return "", fmt.Errorf("network '%s' not found", network)
+		return "", false
 	}
 
-	for tokenName, addr := range networks.(map[string]string) {
+	for token, addr := range tokens {
 		if addr == contractAddr {
-			return tokenName, nil
+			return token, true
 		}
 	}
-
-	return "", fmt.Errorf("token not found for address '%s' in network '%s'", contractAddr, network)
+	return "", false
 }

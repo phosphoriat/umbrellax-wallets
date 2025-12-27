@@ -32,7 +32,7 @@ func NewWithdrawalsTask() *WithdrawalsTask {
 			name:        "withdrawals",
 			description: "Process withdrawals",
 		},
-		bybit:                    bybit.GetHTTPClient(),
+		bybit:                    bybit.GetClient(),
 		redis:                    redis.GetClient(),
 		RedisBybitWithdrawalsKey: cfg.RedisBybitWithdrawalsKey,
 		RedisWithdrawalsKey:      cfg.RedisWithdrawalsKey,
@@ -62,72 +62,63 @@ func (t *WithdrawalsTask) Execute(ctx context.Context) error {
 
 // @private processItem Process hash item
 func (t *WithdrawalsTask) processItem(ctx context.Context, requestId, itemStr string) error {
-	// Unmarshalling JSON item string
-	var item map[string]any
-	err := json.Unmarshal([]byte(itemStr), &item)
-	if err != nil {
+	// Parse JSON item string
+	var item chains.WithdrawalTransaction
+	if err := json.Unmarshal([]byte(itemStr), &item); err != nil {
 		return fmt.Errorf("failed to unmarshal bybit withdrawal tx item: %w", err)
 	}
-
-	// Check types assertion
-	bybitId, okB := item["bybit_id"].(string)
-	currency, okC := item["currency"].(string)
-	network, okN := item["network"].(string)
-	to, okT := item["to"].(string)
-	amount, okA := item["amount"].(float64)
-	memo, okM := item["memo"].(string)
-	amlId, okAml := item["aml_id"].(string)
-	if !okM {
-		memo = ""
-	}
-	if !okB || !okC || !okN || !okT || !okA || !okAml {
+	if item.BybitId == "" || item.Currency == "" || item.Network == "" || item.To == "" || item.Amount == 0 {
 		return fmt.Errorf("invalid bybit withdrawal tx item data: %+v", item)
 	}
 
 	// Check bybit withdrawal tx status
-	resultMap, err := t.bybit.GetWithdrawalRecords(map[string]any{"withdrawID": bybitId})
+	resultMap, err := t.bybit.GetWithdrawalRecords(ctx, map[string]any{"withdrawID": item.BybitId})
 	if err != nil {
 		return err
 	}
 
 	if status, ok := utils.DataGet(resultMap, "0.status"); ok {
-		var txItem []byte
+		var txData map[string]any
 
 		// If status is success
 		if status == "success" {
 			// Get chain service instance from registry
-			chainService, err := chains.GetChainService(network)
+			chainService, err := chains.GetChainService(item.Network)
 			if err != nil {
 				return err
 			}
 
 			// Send transaction from master wallet to address from withdraw request
-			hash, err := chainService.SendTransaction("master", nil, currency, to, amount, memo)
+			hash, err := chainService.SendTransaction("master", nil, item.Currency, item.To, item.Amount, item.Memo)
 			if err != nil {
 				return err
 			}
 
 			// Set transaction item with pending status
-			txItem, _ = json.Marshal(map[string]any{
-				"bybit_id": bybitId,
+			txData = map[string]any{
+				"bybit_id": item.BybitId,
 				"status":   "pending",
 				"hash":     hash,
-				"aml_id":   amlId,
-			})
+				"aml_id":   item.AmlId,
+			}
 
 		} else {
 			// Set transaction item with failed status
-			txItem, _ = json.Marshal(map[string]any{
-				"bybit_id": bybitId,
+			txData = map[string]any{
+				"bybit_id": item.BybitId,
 				"status":   "failed",
-			})
+			}
 		}
 
-		// Push transaction item in withdrawals Redis queue
+		txItem, err := json.Marshal(txData)
+		if err != nil {
+			return fmt.Errorf("failed to marshal bybit withdrawal tx item: %w", err)
+		}
+
+		// Add transaction item in withdrawals Redis HASH
 		t.redis.HSet(ctx, t.RedisWithdrawalsKey, requestId, txItem)
 
 		return nil
 	}
-
 	return fmt.Errorf("bybit withdrawal tx status parse error")
 }

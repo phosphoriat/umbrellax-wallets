@@ -10,6 +10,7 @@ import (
 	"wallets/internal/config"
 	"wallets/internal/database/redis"
 	"wallets/internal/services/api/bybit"
+	"wallets/internal/services/chains"
 )
 
 type WithdrawRequestTask struct {
@@ -31,7 +32,7 @@ func NewWithdrawRequestsTask() *WithdrawRequestTask {
 			name:        "withdraw_requests",
 			description: "Process withdraw requests",
 		},
-		bybit:                    bybit.GetHTTPClient(),
+		bybit:                    bybit.GetClient(),
 		redis:                    redis.GetClient(),
 		RedisBybitReqsKey:        cfg.RedisBybitReqsKey,
 		RedisBybitWithdrawalsKey: cfg.RedisBybitWithdrawalsKey,
@@ -69,44 +70,29 @@ func (t *WithdrawRequestTask) Execute(ctx context.Context) error {
 
 // @private processItem Process hash item
 func (t *WithdrawRequestTask) processItem(ctx context.Context, requestId, itemStr string) error {
-	// Unmarshalling JSON item string
-	var item map[string]any
-	err := json.Unmarshal([]byte(itemStr), &item)
-	if err != nil {
-		return fmt.Errorf("failed to unmarshal bybit withdraw request item: %w", err)
+	// Parse JSON item string
+	var item chains.WithdrawalTransaction
+	if err := json.Unmarshal([]byte(itemStr), &item); err != nil {
+		return fmt.Errorf("failed to unmarshal bybit withdrawal tx item: %w", err)
 	}
-
-	// Check types assertion
-	currency, okC := item["currency"].(string)
-	network, okN := item["network"].(string)
-	to, okT := item["to"].(string)
-	amount, okA := item["amount"].(float64)
-	memo, okM := item["memo"].(string)
-	amlId, okAml := item["aml_id"].(string)
-	if !okM {
-		memo = ""
-	}
-	if !okC || !okN || !okT || !okA || !okAml {
-		return fmt.Errorf("invalid bybit withdraw request item data: %+v", item)
+	if item.Currency == "" || item.Network == "" || item.To == "" || item.Amount == 0 {
+		return fmt.Errorf("invalid bybit withdrawal tx item data: %+v", item)
 	}
 
 	// Send withdraw from bybit to master wallet
-	bybitId, err := t.bybit.CreateWithdraw(currency, network, amount)
+	bybitId, err := t.bybit.CreateWithdraw(ctx, item.Currency, item.Network, item.Amount)
 	if err != nil {
 		return fmt.Errorf("bybit withdrawal tx error: %w", err)
 	}
 
-	// Add item in bybit_withdrawals Redis hash with success status
-	wItem, _ := json.Marshal(map[string]any{
-		"bybit_id": bybitId,
-		"status":   "success",
-		"currency": currency,
-		"network":  network,
-		"to":       to,
-		"amount":   amount,
-		"memo":     memo,
-		"aml_id":   amlId,
-	})
+	// Add item in bybit_withdrawals Redis HASH with success status
+	item.BybitId = bybitId
+	item.Status = "success"
+	wItem, err := json.Marshal(item)
+	if err != nil {
+		return fmt.Errorf("failed to marshal bybit withdrawal item: %w", err)
+	}
+
 	t.redis.HSet(ctx, t.RedisBybitWithdrawalsKey, requestId, wItem)
 
 	return nil

@@ -104,7 +104,7 @@ func (c *Client) closeConnection() error {
 }
 
 // Set string key value with TTL
-func (c *Client) Set(ctx context.Context, key string, value interface{}, expiration time.Duration) error {
+func (c *Client) Set(ctx context.Context, key string, value any, expiration time.Duration) error {
 	client, err := c.getClient()
 	if err != nil {
 		return err
@@ -193,7 +193,7 @@ func (c *Client) Expire(ctx context.Context, key string, expiration time.Duratio
 }
 
 // HSet Set hash field value
-func (c *Client) HSet(ctx context.Context, key, field string, value interface{}) error {
+func (c *Client) HSet(ctx context.Context, key, field string, value any) error {
 	client, err := c.getClient()
 	if err != nil {
 		return err
@@ -203,7 +203,7 @@ func (c *Client) HSet(ctx context.Context, key, field string, value interface{})
 }
 
 // HMSet Set hash multiple field values
-func (c *Client) HMSet(ctx context.Context, key string, values map[string]interface{}) error {
+func (c *Client) HMSet(ctx context.Context, key string, values map[string]any) error {
 	client, err := c.getClient()
 	if err != nil {
 		return err
@@ -233,7 +233,7 @@ func (c *Client) HGetAll(ctx context.Context, key string) (map[string]string, er
 }
 
 // HMGet Get multiple field values from hash
-func (c *Client) HMGet(ctx context.Context, key string, fields ...string) ([]interface{}, error) {
+func (c *Client) HMGet(ctx context.Context, key string, fields ...string) ([]any, error) {
 	client, err := c.getClient()
 	if err != nil {
 		return nil, err
@@ -292,7 +292,7 @@ func (c *Client) GetFirstHashElement(ctx context.Context, key string) (string, s
 }
 
 // LPush Add values to the top of list
-func (c *Client) LPush(ctx context.Context, key string, values ...interface{}) error {
+func (c *Client) LPush(ctx context.Context, key string, values ...any) error {
 	client, err := c.getClient()
 	if err != nil {
 		return err
@@ -302,7 +302,7 @@ func (c *Client) LPush(ctx context.Context, key string, values ...interface{}) e
 }
 
 // RPush Add values to the end of list
-func (c *Client) RPush(ctx context.Context, key string, values ...interface{}) error {
+func (c *Client) RPush(ctx context.Context, key string, values ...any) error {
 	client, err := c.getClient()
 	if err != nil {
 		return err
@@ -362,7 +362,7 @@ func (c *Client) LTrim(ctx context.Context, key string, start, stop int64) error
 }
 
 // SAdd Add values to set
-func (c *Client) SAdd(ctx context.Context, key string, values ...interface{}) error {
+func (c *Client) SAdd(ctx context.Context, key string, values ...any) error {
 	client, err := c.getClient()
 	if err != nil {
 		return err
@@ -372,7 +372,7 @@ func (c *Client) SAdd(ctx context.Context, key string, values ...interface{}) er
 }
 
 // SIsMember Check if value is in set
-func (c *Client) SIsMember(ctx context.Context, key string, value interface{}) (bool, error) {
+func (c *Client) SIsMember(ctx context.Context, key string, value any) (bool, error) {
 	client, err := c.getClient()
 	if err != nil {
 		return false, err
@@ -392,7 +392,7 @@ func (c *Client) SMembers(ctx context.Context, key string) ([]string, error) {
 }
 
 // SRem Remove values from set
-func (c *Client) SRem(ctx context.Context, key string, values ...interface{}) error {
+func (c *Client) SRem(ctx context.Context, key string, values ...any) error {
 	client, err := c.getClient()
 	if err != nil {
 		return err

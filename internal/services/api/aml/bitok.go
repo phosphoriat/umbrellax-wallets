@@ -2,6 +2,7 @@ package aml
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -52,80 +53,56 @@ func newBitokClient() *Client {
 		apiKey:    cfg.AmlApiKey,
 		apiSecret: cfg.AmlApiSecret,
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: 5 * time.Second,
 		},
 	}
 }
 
 // GetManualCheck Get manual check info
+// ctx: Current process context
 // checkId: Manual check id
-func (c *Client) GetManualCheck(checkId string) (string, string, error) {
-	timestamp := time.Now().UnixMilli()
-	endpoint := "/v1/manual-checks/" + checkId
-
-	req, err := http.NewRequest("GET", c.apiUrl+endpoint, nil)
-	if err != nil {
-		return "", "", fmt.Errorf("API request create error: %w", err)
-	}
-
-	signature := c.getHMAC("GET", endpoint, timestamp, "")
-	c.setHeaders(req, timestamp, signature)
-
-	res, err := c.executeRequest(req)
+// Returns: Check status, risk level
+func (c *Client) GetManualCheck(ctx context.Context, checkId string) (string, string, error) {
+	// Execute request and get parsed response
+	res, err := c.executeRequest(ctx, http.MethodGet, "/v1/manual-checks/"+checkId, nil)
 	if err != nil {
 		return "", "", err
 	}
 
+	// Get amd id, status and risk level from parsed response
 	_, okI := res["id"].(string)
 	status, okC := res["check_status"].(string)
 	riskLevel, okR := res["risk_level"].(string)
 	if !okI || !okC || !okR {
-		return "", "", fmt.Errorf("API response format error")
+		return "", "", fmt.Errorf("[Bitok API] Response format error")
 	}
 
 	return status, riskLevel, nil
 }
 
 // CheckAddress Manual check address
+// ctx: Current process context
 // network: Network native token
 // address: Address
-func (c *Client) CheckAddress(network, address string) (string, string, error) {
-	// Get native token
-	nativeToken, err := config.GetChainSetting[string](config.NetworkSettings, fmt.Sprintf("%s.native_token", network))
-	if err != nil {
-		return "", "", fmt.Errorf("failed to get native_token for %s from config: %w", network, err)
-	}
+// Returns: Check status, risk level
+func (c *Client) CheckAddress(ctx context.Context, network, address string) (string, string, error) {
+	// Get native token for network
+	nativeToken := config.NetworkSettings[network].NativeToken
 
-	timestamp := time.Now().UnixMilli()
-	endpoint := "/v1/manual-checks/check-address/"
-
-	payload, err := json.Marshal(map[string]any{
+	// Execute request and get parsed response
+	res, err := c.executeRequest(ctx, http.MethodPost, "/v1/manual-checks/check-address/", map[string]any{
 		"network": nativeToken,
 		"address": address,
 	})
 	if err != nil {
-		return "", "", fmt.Errorf("JSON serialize error: %w", err)
-	}
-
-	req, err := http.NewRequest("POST", c.apiUrl+endpoint, bytes.NewReader(payload))
-	if err != nil {
-		return "", "", fmt.Errorf("API request create error: %w", err)
-	}
-
-	signature := c.getHMAC("POST", endpoint, timestamp, string(payload))
-	c.setHeaders(req, timestamp, signature)
-
-	res, err := c.executeRequest(req)
-	if err != nil {
 		return "", "", err
 	}
 
+	// Get aml id from parsed response
 	amlId, ok := res["id"].(string)
 	if !ok {
-		return "", "", fmt.Errorf("API response format error: id not found")
+		return "", "", fmt.Errorf("[Bitok API] Response format error: id not found")
 	}
-
-	var status, riskLevel string
 
 	// Create retrier with options
 	retrier := retry.New(
@@ -133,14 +110,16 @@ func (c *Client) CheckAddress(network, address string) (string, string, error) {
 		retry.Delay(1*time.Second),
 		retry.DelayType(retry.FixedDelay),
 		retry.OnRetry(func(n uint, err error) {
-			log.Printf("CheckAddress retry attempt %d: %v", n, err)
+			log.Printf("[Bitok API] CheckAddress retry attempt %d: %v", n, err)
 		}),
 	)
 
+	// Run manual check with retries
+	var status, riskLevel string
 	err = retrier.Do(
 		func() error {
 			var err error
-			status, riskLevel, err = c.GetManualCheck(amlId)
+			status, riskLevel, err = c.GetManualCheck(ctx, amlId)
 			if err != nil {
 				return err
 			}
@@ -148,7 +127,6 @@ func (c *Client) CheckAddress(network, address string) (string, string, error) {
 			if status == "error" {
 				return retry.Unrecoverable(fmt.Errorf("status=error"))
 			}
-
 			if status == "checked" && riskLevel != "undefined" {
 				return nil
 			}
@@ -157,40 +135,35 @@ func (c *Client) CheckAddress(network, address string) (string, string, error) {
 		},
 	)
 	if err != nil {
-		return amlId, "", fmt.Errorf("AML address check '%s' failed: %w", amlId, err)
+		return amlId, "", fmt.Errorf("[Bitok API] AML address check '%s' failed: %w", amlId, err)
 	}
 
 	return amlId, riskLevel, nil
 }
 
 // CheckTransaction Manual check transaction
+// ctx: Current process context
 // network: Network native token
 // currency: Token ticker
 // hash: Transaction hash
 // toAddress: Transaction to address
 // direction: incoming/outgoing
-func (c *Client) CheckTransaction(network, currency, hash, toAddress, direction string) (string, error) {
-	// Get native token
-	nativeToken, err := config.GetChainSetting[string](config.NetworkSettings, fmt.Sprintf("%s.native_token", network))
-	if err != nil {
-		return "", fmt.Errorf("failed to get native_token for %s from config: %w", network, err)
-	}
+// Returns: Aml id
+func (c *Client) CheckTransaction(ctx context.Context, network, currency, hash, toAddress, direction string) (string, error) {
+	// Get native token for network
+	nativeToken := config.NetworkSettings[network].NativeToken
 
-	// Get token id
-	var tokenId string
-	if currency == nativeToken {
-		tokenId = "native"
-	} else {
-		tokenId, err = config.GetChainSetting[string](config.ContractsAddresses, fmt.Sprintf("%s.%s", network, currency))
-		if err != nil {
-			return "", fmt.Errorf("failed to get contract address: %w", err)
+	// Get token id value for payload by currency
+	tokenId := "native"
+	if currency != nativeToken {
+		var ok bool
+		if tokenId, ok = config.GetContractAddress(network, currency); !ok {
+			return "", fmt.Errorf("[Bitok API] Failed to get contract address for %s in %s network from config",
+				currency, network)
 		}
 	}
-
-	timestamp := time.Now().UnixMilli()
-	endpoint := "/v1/manual-checks/check-transfer"
-
-	payload, err := json.Marshal(map[string]any{
+	// Execute request and get parsed response
+	res, err := c.executeRequest(ctx, http.MethodPost, "/v1/manual-checks/check-transfer", map[string]any{
 		"network":        nativeToken,
 		"token_id":       tokenId,
 		"tx_hash":        hash,
@@ -198,59 +171,76 @@ func (c *Client) CheckTransaction(network, currency, hash, toAddress, direction 
 		"direction":      direction,
 	})
 	if err != nil {
-		return "", fmt.Errorf("JSON serialize error: %w", err)
-	}
-
-	req, err := http.NewRequest("POST", c.apiUrl+endpoint, bytes.NewReader(payload))
-	if err != nil {
-		return "", fmt.Errorf("API request create error: %w", err)
-	}
-
-	signature := c.getHMAC("POST", endpoint, timestamp, string(payload))
-	c.setHeaders(req, timestamp, signature)
-
-	res, err := c.executeRequest(req)
-	if err != nil {
 		return "", err
 	}
 
+	// Get aml id from parsed response
 	amlId, ok := res["id"].(string)
 	if !ok {
-		return "", fmt.Errorf("API response format error: id not found")
+		return "", fmt.Errorf("[Bitok API] Response format error: id not found")
 	}
 
 	return amlId, nil
 }
 
-// @private executeRequest
-// Execute HTTP request and parse response
-func (c *Client) executeRequest(req *http.Request) (map[string]any, error) {
+// @private executeRequest Create HTTP request entity, execute and return response data
+// ctx: Current process context
+// method: Request method
+// endpoint: API endpoint
+// data: Request payload data
+func (c *Client) executeRequest(ctx context.Context, method, endpoint string, data map[string]any) (map[string]any, error) {
+	// Create request payload
+	var (
+		payload    *bytes.Reader
+		sigPayload string
+	)
+	if len(data) > 0 {
+		parsedData, err := json.Marshal(data)
+		if err != nil {
+			return nil, fmt.Errorf("[Bitok API] JSON payload serialize error: %w", err)
+		}
+
+		payload = bytes.NewReader(parsedData)
+		sigPayload = string(parsedData)
+	}
+
+	// Create new request entity
+	req, err := http.NewRequestWithContext(ctx, method, c.apiUrl+endpoint, payload)
+	if err != nil {
+		return nil, fmt.Errorf("[Bitok API] Failed to create request: %w", err)
+	}
+
+	// Add signature to headers
+	timestamp := time.Now().UnixMilli()
+	signature := c.getHMAC(method, endpoint, timestamp, sigPayload)
+	c.setHeaders(req, timestamp, signature)
+
+	// Execute request and get response
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("API request error: %w", err)
+		return nil, fmt.Errorf("[Bitok API] Failed to execute request: %w", err)
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("API response read error: %w", err)
-	}
-
 	// Check response status code
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("API response body error: %s", string(body))
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("[Bitok API] Response failed with status %d: %s", resp.StatusCode, body)
 	}
 
+	// Read and parse response body
 	var result map[string]any
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("API response JSON parse error: %w", err)
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("[Bitok API] Failed to parse response JSON: %w", err)
 	}
 
 	return result, nil
 }
 
-// @private setHeaders
-// Set request headers
+// @private setHeaders Set request headers
+// req: Request entity
+// timestamp: Current timestamp
+// signature: Request signature
 func (c *Client) setHeaders(req *http.Request, timestamp int64, signature string) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
@@ -259,8 +249,11 @@ func (c *Client) setHeaders(req *http.Request, timestamp int64, signature string
 	req.Header.Set("API-SIGNATURE", signature)
 }
 
-// @private getHMAC
-// Generate HMAC signature
+// @private getHMAC Generate HMAC signature
+// method: Request method
+// endpoint: API endpoint
+// timestamp: Current timestamp
+// jsonPayload: Request payload in JSON
 func (c *Client) getHMAC(method, endpoint string, timestamp int64, jsonPayload string) string {
 	strToSign := fmt.Sprintf("%s\n%s\n%d", strings.ToUpper(method), endpoint, timestamp)
 	if jsonPayload != "" {

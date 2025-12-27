@@ -16,7 +16,7 @@ type (
 	// GetUserWalletQuery validation rules
 	GetUserWalletQuery struct {
 		Network string `validate:"required,network"`
-		UserId  int    `validate:"required,integer"`
+		UserId  uint   `validate:"required,gt=0"`
 	}
 	// GetMasterWalletQuery validation rules
 	GetMasterWalletQuery struct {
@@ -33,7 +33,7 @@ func NewWalletsHandler(service *services.WalletsService) *WalletsHandler {
 // GET /api/wallets?user_id={userId}&network={network}
 func (h *WalletsHandler) GetUserWallet(c *fiber.Ctx) error {
 	params := &GetUserWalletQuery{
-		UserId:  c.QueryInt("user_id"),
+		UserId:  uint(c.QueryInt("user_id")),
 		Network: c.Query("network"),
 	}
 

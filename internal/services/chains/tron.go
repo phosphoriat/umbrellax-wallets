@@ -2,7 +2,6 @@ package chains
 
 import (
 	"context"
-	"crypto/ecdsa"
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
@@ -29,6 +28,8 @@ import (
 	"github.com/fbsobreira/gotron-sdk/pkg/common/decimals"
 	"github.com/fbsobreira/gotron-sdk/pkg/proto/api"
 	"github.com/fbsobreira/gotron-sdk/pkg/proto/core"
+	"github.com/tyler-smith/go-bip39"
+	"golang.org/x/sync/semaphore"
 	"golang.org/x/time/rate"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -87,15 +88,15 @@ func newTron() *Tron {
 		log.Fatalf("[Tron] Failed to connect to RPC API: %v", err)
 	}
 
-	networkCode := "tron"
 	// Get network settings
-	networkSettings := config.NetworkSettings[networkCode].(map[string]any)
+	networkCode := "tron"
+	nativeToken := config.NetworkSettings[networkCode].NativeToken
 
 	return &Tron{
 		BaseChainService: BaseChainService{
 			WalletRepo:  repository.NewWalletRepository(),
 			NetworkCode: networkCode,
-			NativeToken: networkSettings["native_token"].(string),
+			NativeToken: nativeToken,
 		},
 		Client:        rpcClient,
 		RateLimit:     cfg.QuickNodeRps,
@@ -112,27 +113,31 @@ func (tron *Tron) GetCode() string {
 // GetUserWallet Get user HD-wallet by user id
 // userId: Unique user id
 // Returns: User HD-wallet address
-func (tron *Tron) GetUserWallet(userId int) (string, error) {
+func (tron *Tron) GetUserWallet(userId uint32) (string, error) {
 	// Get master wallet data from Vault
-	masterData, err := vault.GetClient().GetSecret("/master/" + tron.NetworkCode)
+	masterData, err := vault.GetClient().GetSecret("master/" + tron.NetworkCode)
 	if err != nil {
 		return "", fmt.Errorf("failed to get master data: %w", err)
 	}
+	mnemonic, ok := masterData["mnemonic"].(string)
+	if !ok || mnemonic == "" {
+		return "", fmt.Errorf("mnemonic not found in Vault")
+	}
 
-	// Derive user address from master private key
-	derivedAddr, err := tron.deriveAddress(masterData["privateKey"].(string), uint32(userId))
+	// Derive user address from master mnemonic
+	addr, _, err := tron.deriveWallet(mnemonic, userId)
 	if err != nil {
 		return "", fmt.Errorf("failed to derive address for user %d: %w", userId, err)
 	}
 
-	return derivedAddr, nil
+	return addr, nil
 }
 
 // GetMasterWallet Get master wallet info (address and token balances)
 // Returns: Map of master wallet info (address and balances of all available tokens)
 func (tron *Tron) GetMasterWallet() (map[string]any, error) {
 	// Get master wallet info from Vault
-	masterData, err := vault.GetClient().GetSecret("/master/" + tron.NetworkCode)
+	masterData, err := vault.GetClient().GetSecret("master/" + tron.NetworkCode)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get master data: %w", err)
 	}
@@ -140,7 +145,7 @@ func (tron *Tron) GetMasterWallet() (map[string]any, error) {
 
 	// Get TRC20 token balances
 	balances := make(map[string]any)
-	for token, contractAddr := range config.ContractsAddresses[tron.NetworkCode].(map[string]string) {
+	for token, contractAddr := range config.ContractsAddresses[tron.NetworkCode] {
 		tokenBalance, _ := tron.getTrc20Balance(contractAddr, masterAddr)
 		balances[token] = tokenBalance
 	}
@@ -163,37 +168,20 @@ func (tron *Tron) GetMasterWallet() (map[string]any, error) {
 // toAddr: Withdrawal to address
 // amount: Amount in float value
 // Returns: Map of all fee types (chain_fee, bybit_fee, aml_fee)
-func (tron *Tron) GetTransactionCommission(
-	oType, wType string, wId *string, currency, toAddr string, amount float64, memo string,
-) (map[string]float64, error) {
-	var walletPath string
-	if wType == "master" {
-		walletPath = "/master/" + tron.NetworkCode
-	} else {
-		if wId == nil {
-			return nil, fmt.Errorf("wId is required")
-		}
-		walletPath = fmt.Sprintf("/users/%s/%s", *wId, tron.NetworkCode)
-	}
-
-	// Get wallet data from Vault
-	walletData, err := vault.GetClient().GetSecret(walletPath)
+func (tron *Tron) GetTransactionCommission(oType, wType string, wId *uint32, currency, toAddr string, amount float64, memo string) (map[string]float64, error) {
+	// Get wallet address by type and id
+	walletAddr, _, err := tron.getWallet(wType, wId)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get wallet data: %w", err)
-	}
-	// Extract wallet address
-	fromAddr, ok := walletData["address"].(string)
-	if !ok || fromAddr == "" {
-		return nil, fmt.Errorf("invalid or missing %s wallet address in Vault", tron.NetworkCode)
+		return nil, err
 	}
 
 	// Calc chain fee for currency (in TRX value)
 	var chainFee float64
 	switch currency {
 	case "TRX":
-		chainFee, err = tron.calcNativeFee(fromAddr, toAddr, amount)
+		chainFee, err = tron.calcNativeFee(walletAddr, toAddr, amount)
 	default:
-		chainFee, err = tron.calcTrc20Fee(currency, fromAddr, toAddr, amount)
+		chainFee, err = tron.calcTrc20Fee(currency, walletAddr, toAddr, amount)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get transaction commission: %w", err)
@@ -201,12 +189,13 @@ func (tron *Tron) GetTransactionCommission(
 
 	var bybitFee, amlFee float64
 	if oType == "withdrawal" {
-		// Get bybit withdrawal fee (in currency value)
-		bybitFee, _ = bybit.GetHTTPClient().GetWithdrawalFee(currency, tron.NetworkCode)
-
-		// Get AML check cost from config (in USD value)
+		// Load config
 		cfg, _ := config.Load()
-		amlFee, _ = strconv.ParseFloat(cfg.AmlCheckCost, 64)
+
+		// Get bybit withdrawal fee (in currency value)
+		bybitFee, _ = bybit.GetClient().GetWithdrawalFee(context.Background(), currency, tron.NetworkCode)
+		// Get AML check cost from config (in USD value)
+		amlFee = cfg.AmlCheckCost
 	}
 
 	return map[string]float64{
@@ -240,42 +229,25 @@ func (tron *Tron) GetTransactionStatus(hash, toAddr string) (string, error) {
 // toAddr: Withdrawal to address
 // amount: Amount in float value
 // Returns: Transaction hash
-func (tron *Tron) SendTransaction(wType string, wId *string, currency, toAddr string, amount float64, memo string) (string, error) {
-	var walletPath string
-	if wType == "master" {
-		walletPath = fmt.Sprintf("/master/%s", tron.NetworkCode)
-	} else {
-		if wId == nil {
-			return "", fmt.Errorf("wId is required")
-		}
-		walletPath = fmt.Sprintf("/users/%s/%s", *wId, tron.NetworkCode)
-	}
-
-	// Get wallet data from Vault
-	walletData, err := vault.GetClient().GetSecret(walletPath)
+func (tron *Tron) SendTransaction(wType string, wId *uint32, currency, toAddr string, amount float64, memo string) (string, error) {
+	// Get wallet address and private key by type and id
+	walletAddr, walletKey, err := tron.getWallet(wType, wId)
 	if err != nil {
-		return "", fmt.Errorf("failed to get wallet data: %w", err)
-	}
-	// Extract wallet address and private key
-	fromAddr, okF := walletData["address"].(string)
-	privateKey, okP := walletData["privateKey"].(string)
-	if !okF || !okP || fromAddr == "" {
-		return "", fmt.Errorf("invalid or missing %s wallet data in Vault", tron.NetworkCode)
+		return "", err
 	}
 
 	// Send new transaction on chain and get transaction hash
 	var hash string
 	switch currency {
 	case "TRX":
-		hash, err = tron.sendNative(fromAddr, toAddr, amount, privateKey)
+		hash, err = tron.sendNative(walletAddr, toAddr, amount, walletKey)
 	default:
-		hash, err = tron.sendTrc20(currency, fromAddr, toAddr, amount, privateKey)
+		hash, err = tron.sendTrc20(currency, walletAddr, toAddr, amount, walletKey)
 	}
 
 	if err != nil {
 		return "", fmt.Errorf("failed to send transaction: %w", err)
 	}
-
 	return hash, nil
 }
 
@@ -320,23 +292,27 @@ func (tron *Tron) GetInboundTransactions(ctx context.Context) ([]*InboundTransac
 	}
 
 	// Get TRX decimals from config
-	trxDecimals, err := config.GetChainSetting[int](
-		config.TokenSettings,
-		fmt.Sprintf("%s.%s.decimals", tron.NetworkCode, "TRX"),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("[%s] Failed to get TRX decimals from config: %w", tron.NetworkCode, err)
-	}
+	trxDecimals := config.TokenSettings[tron.NetworkCode]["TRX"].Decimals
 
 	log.Printf("[%s] Processing %d blocks from %d to %d",
 		tron.NetworkCode, currentBlockNum-lastBlockNumber, lastBlockNumber+1, currentBlockNum)
 
-	// Wait group to wait for all tx blocks goroutines to complete
-	var wg sync.WaitGroup
-	// Concurrent save map for successfully processed blocks
-	successfulBlocks := &sync.Map{}
-	// Channel for collect transactions from all blocks
-	resultChan := make(chan []*InboundTransaction, currentBlockNum-lastBlockNumber)
+	var (
+		// Wait group to wait for all tx blocks goroutines to complete
+		wg sync.WaitGroup
+		// Semaphore for goroutines limit
+		sem = semaphore.NewWeighted(40)
+		// Concurrent save map for successfully processed blocks
+		successfulBlocks = &sync.Map{}
+		// Channel for collect transactions from all blocks
+		resultChan = make(chan []*InboundTransaction, currentBlockNum-lastBlockNumber)
+		// Goroutines cancellation context
+		cancelCtx, cancel = context.WithCancel(ctx)
+		// First error flag
+		errOnce  sync.Once
+		firstErr error
+	)
+	defer cancel()
 
 	// Process all new blocks in separate goroutines
 	for blockNum := lastBlockNumber + 1; blockNum <= currentBlockNum; blockNum++ {
@@ -345,18 +321,34 @@ func (tron *Tron) GetInboundTransactions(ctx context.Context) ([]*InboundTransac
 		go func() {
 			defer wg.Done()
 
+			// Check context cancellation
+			if cancelCtx.Err() != nil {
+				return
+			}
+
+			// Parallel execution limit
+			if err := sem.Acquire(cancelCtx, 1); err != nil {
+				return
+			}
+			defer sem.Release(1)
+
 			// Get block entity by number
-			if err := limiter.Wait(ctx); err != nil {
+			if err := limiter.Wait(cancelCtx); err != nil {
 				log.Printf("[%s] Rate limit error for block %d: %v", tron.NetworkCode, blockNum, err)
 				return
 			}
 			block, err := tron.Client.GetBlockByNum(blockNum)
 			if err != nil {
 				log.Printf("[%s] Failed to get block %d: %v", tron.NetworkCode, blockNum, err)
+				// Cancel all another goroutines
+				errOnce.Do(func() {
+					firstErr = err
+					cancel()
+				})
 				return
 			}
 
-			log.Printf("[%s] Processing block %d with raw %d transactions",
+			log.Printf("[%s] Processing block %d with %d raw transactions",
 				tron.NetworkCode, blockNum, len(block.Transactions))
 
 			// Local goroutine tx list
@@ -427,8 +419,8 @@ func (tron *Tron) GetInboundTransactions(ctx context.Context) ([]*InboundTransac
 					contractAddr := address.Address(triggerContract.ContractAddress).String()
 
 					// Get token name by contract address
-					token, err := config.GetTokenByContractAddr(tron.NetworkCode, contractAddr)
-					if err != nil {
+					token, ok := config.GetTokenByContractAddr(tron.NetworkCode, contractAddr)
+					if !ok {
 						continue
 					}
 
@@ -459,7 +451,7 @@ func (tron *Tron) GetInboundTransactions(ctx context.Context) ([]*InboundTransac
 								tron.decimalsCacheMu.RUnlock()
 								// Fetch decimals from contract
 								if !exists {
-									if err := limiter.Wait(ctx); err != nil {
+									if err := limiter.Wait(cancelCtx); err != nil {
 										return
 									}
 
@@ -523,8 +515,8 @@ func (tron *Tron) GetInboundTransactions(ctx context.Context) ([]*InboundTransac
 			lastContinuousBlock = blockNum
 		} else {
 			// Stop, if found the first failed block
-			log.Printf("[%s] Block %d was not processed successfully, stopping at %d",
-				tron.NetworkCode, blockNum, lastContinuousBlock)
+			log.Printf("[%s] Block %d was not processed successfully, stopping at %d: %v",
+				tron.NetworkCode, blockNum, lastContinuousBlock, firstErr)
 			break
 		}
 	}
@@ -537,75 +529,99 @@ func (tron *Tron) GetInboundTransactions(ctx context.Context) ([]*InboundTransac
 		}
 	}
 
-	log.Printf("[%s] Processing finished successfully, found %d user transactions", tron.NetworkCode, len(txList))
+	log.Printf("[%s] Processing finished successfully: processed %d blocks, found %d user transactions",
+		tron.NetworkCode, lastContinuousBlock-lastBlockNumber, len(txList))
 	return txList, nil
 }
 
 /* GetUserWallet private methods group */
-// @private deriveAddress Derive HD-wallet address by derivation index from master wallet private key
-// masterPrivateKey: Master wallet private key
-// userId: Unique user id for derivation index
-// Returns: Derived address
-func (tron *Tron) deriveAddress(masterPrivateKey string, userId uint32) (string, error) {
-	// Get bytes from private key
-	bytes, _ := hex.DecodeString(masterPrivateKey)
-	// Create new master node from bytes for use in creating HD keychain
-	masterHdKey, err := hdkeychain.NewMaster(bytes, &chaincfg.MainNetParams)
+// @private getWallet Get HD-wallet by index
+// wType: Wallet type (master/user)
+// wId: User id (only for user wType)
+// Returns: Derived address and private key
+func (tron *Tron) getWallet(wType string, wId *uint32) (string, string, error) {
+	// Get master wallet data from Vault
+	masterData, err := vault.GetClient().GetSecret("master/" + tron.NetworkCode)
 	if err != nil {
-		return "", fmt.Errorf("failed to derive master HD key: %w", err)
+		return "", "", fmt.Errorf("failed to get master data: %w", err)
+	}
+	mnemonic, ok := masterData["mnemonic"].(string)
+	if !ok || mnemonic == "" {
+		return "", "", fmt.Errorf("mnemonic not found in vault")
+	}
+
+	// Derive wallet address and private key from master mnemonic
+	var index uint32
+	if wType == "master" {
+		index = 0
+	} else {
+		if wId == nil {
+			return "", "", fmt.Errorf("user id is required")
+		}
+		index = *wId
+	}
+
+	return tron.deriveWallet(mnemonic, index)
+}
+
+// @private deriveWallet Derive HD-wallet by derivation index from master wallet mnemonic
+// mnemonic: Master wallet mnemonic
+// userId: Unique user id for derivation index
+// Returns: Derived address and private key
+func (tron *Tron) deriveWallet(mnemonic string, userId uint32) (string, string, error) {
+	// Validate mnemonic
+	if !bip39.IsMnemonicValid(mnemonic) {
+		return "", "", fmt.Errorf("invalid master wallet mnemonic")
+	}
+	// Generate seed from mnemonic (BIP39)
+	seed := bip39.NewSeed(mnemonic, "")
+
+	// Create HD master key from seed
+	masterKey, err := hdkeychain.NewMaster(seed, &chaincfg.MainNetParams)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to derive master HD key: %w", err)
 	}
 
 	// BIP44 derivation: m/44'/195'/0'/0/{index} (accountKey = 0)
-	purposeKey, _ := masterHdKey.Derive(hdkeychain.HardenedKeyStart + 44)
-	coinKey, _ := purposeKey.Derive(hdkeychain.HardenedKeyStart + 195)
-	accountKey, _ := coinKey.Derive(hdkeychain.HardenedKeyStart + 0)
-	changeKey, _ := accountKey.Derive(0)
-	finalKey, err := changeKey.Derive(userId)
+	path := []uint32{
+		hdkeychain.HardenedKeyStart + 44,
+		hdkeychain.HardenedKeyStart + 195,
+		hdkeychain.HardenedKeyStart + 0,
+		0,
+		userId,
+	}
+	key := masterKey
+	for i, p := range path {
+		key, err = key.Derive(p)
+		if err != nil {
+			return "", "", fmt.Errorf("failed to derive key at depth %d: %w", i, err)
+		}
+	}
+
+	// Get private key
+	btcecPrivKey, err := key.ECPrivKey()
 	if err != nil {
-		return "", fmt.Errorf("failed to derive final key: %w", err)
+		return "", "", fmt.Errorf("failed to get EC private key: %w", err)
 	}
+	ecdsaPrivKey := btcecPrivKey.ToECDSA()
+	privateKey := hex.EncodeToString(crypto.FromECDSA(ecdsaPrivKey))
 
-	// Get btcec private key
-	btcecPrivateKey, _ := finalKey.ECPrivKey()
-	// Convert to ecdsa private key
-	privateKeyEcdsa := btcecPrivateKey.ToECDSA()
+	// Get public key and convert to Tron address
+	pubKeyBytes := crypto.FromECDSAPub(&ecdsaPrivKey.PublicKey)[1:] // remove 0x04 prefix
+	hash := crypto.Keccak256(pubKeyBytes)
 
-	// Get ecdsa public key from ecdsa private key
-	publicKey := privateKeyEcdsa.Public()
-	publicKeyEcdsa, ok := publicKey.(*ecdsa.PublicKey)
-	if !ok {
-		return "", fmt.Errorf("failed to convert to ECDSA public key")
-	}
+	// Take last 20 bytes + Tron prefix (0x41)
+	addressBytes := append([]byte{0x41}, hash[12:]...)
 
-	// Get tron address from ecdsa public key
-	addr, _ := tron.publicKeyToTronAddress(publicKeyEcdsa)
-	return addr, nil
-}
-
-// @private publicKeyToTronAddress Get Tron address from HD-wallet public key
-// Returns: Address in Tron base58 format
-func (tron *Tron) publicKeyToTronAddress(publicKey *ecdsa.PublicKey) (string, error) {
-	// Get bytes from public key and remove 0x04 prefix
-	publicKeyBytes := crypto.FromECDSAPub(publicKey)[1:]
-
-	// Get Keccak256 hash (standard Tron address generation)
-	hash := crypto.Keccak256(publicKeyBytes)
-
-	// Take last 20 bytes of hash
-	addressBytes := hash[12:]
-
-	// Add Tron prefix (0x41 for mainnet)
-	addressWithPrefix := append([]byte{0x41}, addressBytes...)
-
-	// Calculate checksum (double SHA256)
-	checksum1 := sha256.Sum256(addressWithPrefix)
+	// Double SHA256 checksum
+	checksum1 := sha256.Sum256(addressBytes)
 	checksum2 := sha256.Sum256(checksum1[:])
 
-	// Append first 4 bytes of checksum
-	finalBytes := append(addressWithPrefix, checksum2[:4]...)
+	// Base58 encode with checksum
+	finalBytes := append(addressBytes, checksum2[:4]...)
+	addr := base58.Encode(finalBytes)
 
-	// Base58 encode
-	return base58.Encode(finalBytes), nil
+	return addr, privateKey, nil
 }
 
 /* GetMasterWallet private methods group */
@@ -628,10 +644,7 @@ func (tron *Tron) getNativeBalance(addr string) (float64, error) {
 	rawBalance := big.NewInt(account.Balance)
 
 	// Get TRX decimals
-	trxDecimals, _ := config.GetChainSetting[int](
-		config.TokenSettings,
-		fmt.Sprintf("%s.%s.decimals", tron.NetworkCode, "TRX"),
-	)
+	trxDecimals := config.TokenSettings[tron.NetworkCode]["TRX"].Decimals
 	// Get converted balance (in TRX)
 	trxBalance, _ := decimals.RemoveDecimals(rawBalance, int64(trxDecimals)).Float64()
 
@@ -674,10 +687,7 @@ func (tron *Tron) calcNativeFee(fromAddr, toAddr string, amount float64) (float6
 	}
 
 	// Get TRX decimals
-	trxDecimals, _ := config.GetChainSetting[int](
-		config.TokenSettings,
-		fmt.Sprintf("%s.%s.decimals", tron.NetworkCode, "TRX"),
-	)
+	trxDecimals := config.TokenSettings[tron.NetworkCode]["TRX"].Decimals
 	// Convert amount to SUN
 	amountSun, _ := decimals.ApplyDecimals(big.NewFloat(amount), int64(trxDecimals))
 
@@ -748,12 +758,9 @@ func (tron *Tron) calcTrc20Fee(currency, fromAddr, toAddr string, amount float64
 	}
 
 	// Get token contract address
-	contractAddr, err := config.GetChainSetting[string](
-		config.ContractsAddresses,
-		fmt.Sprintf("%s.%s", tron.NetworkCode, currency),
-	)
-	if err != nil {
-		return 0, fmt.Errorf("failed to get contract address for %s: %w", currency, err)
+	contractAddr, ok := config.GetContractAddress(tron.NetworkCode, currency)
+	if !ok {
+		return 0, fmt.Errorf("contract address not found in config: %s/%s", tron.NetworkCode, currency)
 	}
 
 	// Get contract decimals
@@ -774,13 +781,7 @@ func (tron *Tron) calcTrc20Fee(currency, fromAddr, toAddr string, amount float64
 	)
 	// If err returned, get needed energy value from config
 	if err != nil {
-		energyNeeded, err = config.GetChainSetting[int](
-			config.TokenSettings,
-			fmt.Sprintf("%s.%s.estimated_energy", tron.NetworkCode, currency),
-		)
-		if err != nil {
-			return 0, fmt.Errorf("failed to get estimated_energy for %s from config: %w", currency, err)
-		}
+		energyNeeded = config.TokenSettings[tron.NetworkCode][currency].EstimatedEnergy
 	} else {
 		energyNeeded = int(energyEstimate.EnergyRequired)
 	}
@@ -847,10 +848,7 @@ func (tron *Tron) calcTrc20Fee(currency, fromAddr, toAddr string, amount float64
 	// Get total fee in SUN
 	totalFeeUnits := energyCost + bandwidthCost
 	// Get TRX decimals
-	trxDecimals, _ := config.GetChainSetting[int](
-		config.TokenSettings,
-		fmt.Sprintf("%s.%s.decimals", tron.NetworkCode, "TRX"),
-	)
+	trxDecimals := config.TokenSettings[tron.NetworkCode]["TRX"].Decimals
 	// Convert total fee to TRX
 	totalFee, _ := decimals.RemoveDecimals(big.NewInt(int64(totalFeeUnits)), int64(trxDecimals)).Float64()
 
@@ -904,10 +902,7 @@ func (tron *Tron) sendNative(fromAddr, toAddr string, amount float64, privateKey
 	}
 
 	// Get TRX decimals
-	trxDecimals, _ := config.GetChainSetting[int](
-		config.TokenSettings,
-		fmt.Sprintf("%s.%s.decimals", tron.NetworkCode, "TRX"),
-	)
+	trxDecimals := config.TokenSettings[tron.NetworkCode]["TRX"].Decimals
 	// Convert amount to SUN including decimals
 	amountSun, _ := decimals.ApplyDecimals(big.NewFloat(amount), int64(trxDecimals))
 
@@ -932,12 +927,9 @@ func (tron *Tron) sendTrc20(currency, fromAddr, toAddr string, amount float64, p
 	currency = strings.ToUpper(currency)
 
 	// Get token contract address
-	contractAddr, err := config.GetChainSetting[string](
-		config.ContractsAddresses,
-		fmt.Sprintf("%s.%s", tron.NetworkCode, currency),
-	)
-	if err != nil {
-		return "", fmt.Errorf("failed to get contract address: %w", err)
+	contractAddr, ok := config.GetContractAddress(tron.NetworkCode, currency)
+	if !ok {
+		return "", fmt.Errorf("contract address not found in config: %s/%s", tron.NetworkCode, currency)
 	}
 
 	// Get TRX and token balances

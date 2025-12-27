@@ -15,7 +15,7 @@ import (
 	"wallets/internal/database/vault"
 	"wallets/internal/routes"
 	"wallets/internal/scheduler"
-	"wallets/internal/services/api/bybit"
+	"wallets/internal/services/api/rates"
 	_ "wallets/internal/services/chains"
 
 	"github.com/gofiber/fiber/v2"
@@ -24,6 +24,8 @@ import (
 )
 
 func main() {
+	ctx := context.Background()
+
 	// Load config
 	cfg, err := config.Load()
 	if err != nil {
@@ -49,14 +51,15 @@ func main() {
 	}
 	defer redis.Close()
 
-	// Init Bybit service
-	bybit.Init(cfg)
-
 	// Init scheduler
 	schedulerInstance, err := scheduler.Init()
 	if err != nil {
 		log.Fatal("Failed to init scheduler:", err)
 	}
+
+	// Init rates updater
+	rates.GetClient().Start(ctx)
+	defer rates.GetClient().Stop()
 
 	/* Create app instance */
 	app := fiber.New(fiber.Config{
@@ -98,29 +101,33 @@ func main() {
 	// Get server address and port from config
 	address := fmt.Sprintf("%s:%s", cfg.AppUrl, cfg.AppPort)
 	// Start HTTP server in goroutine
+	errChan := make(chan error, 1)
 	go func() {
 		log.Printf("Server starting on %s", address)
-		if err := app.Listen(address); err != nil {
-			log.Printf("Server failed to start: %v", err)
-			p, _ := os.FindProcess(os.Getpid())
-			p.Signal(os.Interrupt)
-		}
+		errChan <- app.Listen(address)
 	}()
 
 	// Application graceful shutdown
-	GracefulShutdown(app, schedulerInstance)
+	GracefulShutdown(app, errChan, schedulerInstance)
 }
 
 // GracefulShutdown Application graceful shutdown
-func GracefulShutdown(app *fiber.App, schedulerInstance *scheduler.Scheduler) {
+func GracefulShutdown(app *fiber.App, errChan <-chan error, schedulerInstance *scheduler.Scheduler) {
 	// Intercept termination signals
 	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	<-signalCtx.Done()
 
-	log.Println("Shutting down...")
+	// Wait for signal or server error
+	select {
+	case <-signalCtx.Done():
+		log.Println("Application received shutdown signal")
+	case err := <-errChan:
+		log.Printf("Server error: %v", err)
+	}
 
-	// Create a 10s deadline for shutdown
+	log.Println("Application is shutting down...")
+
+	// Create deadline for shutdown (10s)
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 

@@ -1,7 +1,9 @@
 package services
 
 import (
+	"context"
 	"fmt"
+
 	"wallets/internal/services/api/aml"
 	"wallets/internal/services/chains"
 )
@@ -54,7 +56,7 @@ func (s *TransactionsService) SendWithdrawal(network, currency, to string, amoun
 	}
 
 	// AML check to address
-	amlId, riskLevel, err := aml.GetClient().CheckAddress(network, to)
+	amlId, riskLevel, err := aml.GetClient().CheckAddress(context.Background(), network, to)
 	if err != nil {
 		return nil, fmt.Errorf("AML check address '%s' in '%s' failed: %w", to, network, err)
 	}

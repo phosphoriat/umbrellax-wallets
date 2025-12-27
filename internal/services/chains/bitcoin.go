@@ -5,7 +5,6 @@ import (
 	"crypto/hmac"
 	"crypto/sha512"
 	"encoding/binary"
-	"encoding/hex"
 	"fmt"
 	"log"
 	"math/big"
@@ -28,6 +27,8 @@ import (
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
+	"github.com/tyler-smith/go-bip39"
+	"golang.org/x/sync/semaphore"
 	"golang.org/x/time/rate"
 )
 
@@ -77,9 +78,9 @@ func newBitcoin() *Bitcoin {
 		log.Fatalf("[Bitcoin] Failed to connect to RPC API: %v", err)
 	}
 
-	networkCode := "bitcoin"
 	// Get network settings
-	networkSettings := config.NetworkSettings[networkCode].(map[string]any)
+	networkCode := "bitcoin"
+	nativeToken := config.NetworkSettings[networkCode].NativeToken
 
 	// @TODO Remove
 	// Test query
@@ -94,7 +95,7 @@ func newBitcoin() *Bitcoin {
 		BaseChainService: BaseChainService{
 			WalletRepo:  repository.NewWalletRepository(),
 			NetworkCode: networkCode,
-			NativeToken: networkSettings["native_token"].(string),
+			NativeToken: nativeToken,
 		},
 		Client:      client,
 		RateLimit:   cfg.QuickNodeRps,
@@ -109,30 +110,36 @@ func (btc *Bitcoin) GetCode() string {
 
 // GetUserWallet Get user HD-wallet by user id
 // userId: Unique user id
-func (btc *Bitcoin) GetUserWallet(userId int) (string, error) {
+func (btc *Bitcoin) GetUserWallet(userId uint32) (string, error) {
 	// Get master wallet data from Vault
-	masterData, err := vault.GetClient().GetSecret("/master/" + btc.NetworkCode)
+	masterData, err := vault.GetClient().GetSecret("master/" + btc.NetworkCode)
 	if err != nil {
 		return "", fmt.Errorf("failed to get master data: %w", err)
 	}
-
-	// Derive user address from master private key
-	derivedAddr, err := btc.deriveAddress(masterData["privateKey"].(string), uint32(userId))
-	if err != nil {
-		return "", err
+	mnemonic, ok := masterData["mnemonic"].(string)
+	if !ok || mnemonic == "" {
+		return "", fmt.Errorf("mnemonic not found in Vault")
 	}
 
-	return derivedAddr, nil
+	addr, _, err := btc.deriveWallet(mnemonic, userId)
+	if err != nil {
+		return "", fmt.Errorf("failed to derive address for user %d: %w", userId, err)
+	}
+
+	return addr, nil
 }
 
 // GetMasterWallet Get master wallet info (address and token balance)
 func (btc *Bitcoin) GetMasterWallet() (map[string]any, error) {
 	// Get master wallet address from Vault
-	masterData, err := vault.GetClient().GetSecret("/master/" + btc.NetworkCode)
+	masterData, err := vault.GetClient().GetSecret("master/" + btc.NetworkCode)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get master data: %w", err)
 	}
-	masterAddr := masterData["address"].(string)
+	masterAddr, ok := masterData["address"].(string)
+	if !ok || masterAddr == "" {
+		return nil, fmt.Errorf("master address not found in Vault")
+	}
 
 	// Parse and validate master address
 	addr, err := btcutil.DecodeAddress(masterAddr, btc.ChainParams)
@@ -173,30 +180,15 @@ func (btc *Bitcoin) GetMasterWallet() (map[string]any, error) {
 // amount: Amount in float value
 // memo: Memo tag
 // Returns: Map of all fee types (chain_fee, bybit_fee, aml_fee)
-func (btc *Bitcoin) GetTransactionCommission(oType, wType string, wId *string, currency, toAddr string, amount float64, memo string) (map[string]float64, error) {
-	var walletPath string
-	if wType == "master" {
-		walletPath = "/master/" + btc.NetworkCode
-	} else {
-		if wId == nil {
-			return nil, fmt.Errorf("wId is required")
-		}
-		walletPath = fmt.Sprintf("/users/%s/%s", *wId, btc.NetworkCode)
-	}
-
-	// Get wallet data from Vault
-	walletData, err := vault.GetClient().GetSecret(walletPath)
+func (btc *Bitcoin) GetTransactionCommission(oType, wType string, wId *uint32, currency, toAddr string, amount float64, memo string) (map[string]float64, error) {
+	// Get wallet address by type and id
+	walletAddr, _, err := btc.getWallet(wType, wId)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get wallet data: %w", err)
-	}
-	// Extract wallet address
-	fromAddr, ok := walletData["address"].(string)
-	if !ok || fromAddr == "" {
-		return nil, fmt.Errorf("invalid or missing %s wallet address in Vault", btc.NetworkCode)
+		return nil, err
 	}
 
 	// Parse and validate from address (must be Native SegWit)
-	fromAddress, err := btcutil.DecodeAddress(fromAddr, btc.ChainParams)
+	fromAddress, err := btcutil.DecodeAddress(walletAddr, btc.ChainParams)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse from address: %w", err)
 	}
@@ -218,12 +210,13 @@ func (btc *Bitcoin) GetTransactionCommission(oType, wType string, wId *string, c
 
 	var bybitFee, amlFee float64
 	if oType == "withdrawal" {
-		// Get bybit withdrawal fee (in BTC value)
-		bybitFee, _ = bybit.GetHTTPClient().GetWithdrawalFee(currency, btc.NetworkCode)
-
-		// Get AML check cost from config (in USD value)
+		// Load config
 		cfg, _ := config.Load()
-		amlFee, _ = strconv.ParseFloat(cfg.AmlCheckCost, 64)
+
+		// Get bybit withdrawal fee (in BTC value)
+		bybitFee, _ = bybit.GetClient().GetWithdrawalFee(context.Background(), currency, btc.NetworkCode)
+		// Get AML check cost from config (in USD value)
+		amlFee = cfg.AmlCheckCost
 	}
 
 	return map[string]float64{
@@ -272,37 +265,21 @@ func (btc *Bitcoin) GetTransactionStatus(hash, toAddr string) (string, error) {
 // amount: Amount in float value
 // memo: Memo tag
 // Returns: Transaction hash
-func (btc *Bitcoin) SendTransaction(wType string, wId *string, currency, to string, amount float64, memo string) (string, error) {
-	var walletPath string
-	if wType == "master" {
-		walletPath = fmt.Sprintf("/master/%s", btc.NetworkCode)
-	} else {
-		if wId == nil {
-			return "", fmt.Errorf("wId is required")
-		}
-		walletPath = fmt.Sprintf("/users/%s/%s", *wId, btc.NetworkCode)
-	}
-
-	// Get wallet data from Vault
-	walletData, err := vault.GetClient().GetSecret(walletPath)
+func (btc *Bitcoin) SendTransaction(wType string, wId *uint32, currency, to string, amount float64, memo string) (string, error) {
+	// Get wallet address and private key by type and id
+	walletAddr, walletKey, err := btc.getWallet(wType, wId)
 	if err != nil {
-		return "", fmt.Errorf("failed to get wallet data: %w", err)
-	}
-	// Extract wallet address and private key
-	fromAddr, okF := walletData["address"].(string)
-	privateKey, okP := walletData["privateKey"].(string)
-	if !okF || !okP || fromAddr == "" {
-		return "", fmt.Errorf("invalid or missing %s wallet data in Vault", btc.NetworkCode)
+		return "", err
 	}
 
 	// Parse private key (WIF format)
-	wif, err := btcutil.DecodeWIF(privateKey)
+	wif, err := btcutil.DecodeWIF(walletKey)
 	if err != nil {
 		return "", fmt.Errorf("failed to decode private key: %w", err)
 	}
 
 	// Parse and validate from address (must be Native SegWit)
-	fromAddress, err := btcutil.DecodeAddress(fromAddr, btc.ChainParams)
+	fromAddress, err := btcutil.DecodeAddress(walletAddr, btc.ChainParams)
 	if err != nil {
 		return "", fmt.Errorf("failed to parse from address: %w", err)
 	}
@@ -466,23 +443,27 @@ func (btc *Bitcoin) GetInboundTransactions(ctx context.Context) ([]*InboundTrans
 	}
 
 	// Get BTC decimals from config
-	btcDecimals, err := config.GetChainSetting[int](
-		config.TokenSettings,
-		fmt.Sprintf("%s.%s.decimals", btc.NetworkCode, "BTC"),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("[%s] Failed to get BTC decimals from config: %w", btc.NetworkCode, err)
-	}
+	btcDecimals := config.TokenSettings[btc.NetworkCode]["BTC"].Decimals
 
 	log.Printf("[%s] Processing %d blocks from %d to %d",
 		btc.NetworkCode, currentBlockHeight-lastBlockHeight, lastBlockHeight+1, currentBlockHeight)
 
-	// Wait group to wait for all tx blocks goroutines to complete
-	var wg sync.WaitGroup
-	// Concurrent save map for successfully processed blocks
-	successfulBlocks := &sync.Map{}
-	// Channel for collect transactions from all blocks
-	resultChan := make(chan []*InboundTransaction, currentBlockHeight-lastBlockHeight)
+	var (
+		// Wait group to wait for all tx blocks goroutines to complete
+		wg sync.WaitGroup
+		// Semaphore for goroutines limit
+		sem = semaphore.NewWeighted(20)
+		// Concurrent save map for successfully processed blocks
+		successfulBlocks = &sync.Map{}
+		// Channel for collect transactions from all blocks
+		resultChan = make(chan []*InboundTransaction, currentBlockHeight-lastBlockHeight)
+		// Goroutines cancellation context
+		cancelCtx, cancel = context.WithCancel(ctx)
+		// First error flag
+		errOnce  sync.Once
+		firstErr error
+	)
+	defer cancel()
 
 	// Process all new blocks in separate goroutines
 	for blockHeight := lastBlockHeight + 1; blockHeight <= currentBlockHeight; blockHeight++ {
@@ -491,29 +472,50 @@ func (btc *Bitcoin) GetInboundTransactions(ctx context.Context) ([]*InboundTrans
 		go func() {
 			defer wg.Done()
 
+			// Check context cancellation
+			if cancelCtx.Err() != nil {
+				return
+			}
+
+			// Parallel execution limit
+			if err := sem.Acquire(cancelCtx, 1); err != nil {
+				return
+			}
+			defer sem.Release(1)
+
 			// Get block hash by height
-			if err := limiter.Wait(ctx); err != nil {
+			if err := limiter.Wait(cancelCtx); err != nil {
 				log.Printf("[%s] Rate limit error for block %d: %v", btc.NetworkCode, blockHeight, err)
 				return
 			}
 			blockHash, err := btc.Client.GetBlockHash(blockHeight)
 			if err != nil {
 				log.Printf("[%s] Failed to get block hash for height %d: %v", btc.NetworkCode, blockHeight, err)
+				// Cancel all another goroutines
+				errOnce.Do(func() {
+					firstErr = err
+					cancel()
+				})
 				return
 			}
 
 			// Get block by hash
-			if err := limiter.Wait(ctx); err != nil {
+			if err := limiter.Wait(cancelCtx); err != nil {
 				log.Printf("[%s] Rate limit error for block %d: %v", btc.NetworkCode, blockHeight, err)
 				return
 			}
 			block, err := btc.Client.GetBlock(blockHash)
 			if err != nil {
 				log.Printf("[%s] Failed to get block %d: %v", btc.NetworkCode, blockHeight, err)
+				// Cancel all another goroutines
+				errOnce.Do(func() {
+					firstErr = err
+					cancel()
+				})
 				return
 			}
 
-			log.Printf("[%s] Processing block %d with %d transactions",
+			log.Printf("[%s] Processing block %d with %d raw transactions",
 				btc.NetworkCode, blockHeight, len(block.Transactions))
 
 			// Local goroutine tx list
@@ -563,7 +565,7 @@ func (btc *Bitcoin) GetInboundTransactions(ctx context.Context) ([]*InboundTrans
 									prevOutIndex := txIn.PreviousOutPoint.Index
 
 									// Get previous transaction
-									if err := limiter.Wait(ctx); err != nil {
+									if err := limiter.Wait(cancelCtx); err != nil {
 										return
 									}
 									prevTx, err := btc.Client.GetRawTransaction(prevTxHash)
@@ -623,8 +625,8 @@ func (btc *Bitcoin) GetInboundTransactions(ctx context.Context) ([]*InboundTrans
 		if _, ok := successfulBlocks.Load(blockHeight); ok {
 			lastContinuousBlock = blockHeight
 		} else {
-			log.Printf("[%s] Block %d was not processed successfully, stopping at %d",
-				btc.NetworkCode, blockHeight, lastContinuousBlock)
+			log.Printf("[%s] Block %d was not processed successfully, stopping at %d: %v",
+				btc.NetworkCode, blockHeight, lastContinuousBlock, firstErr)
 			break
 		}
 	}
@@ -637,118 +639,117 @@ func (btc *Bitcoin) GetInboundTransactions(ctx context.Context) ([]*InboundTrans
 		}
 	}
 
-	log.Printf("[%s] Processing finished successfully, found %d user transactions", btc.NetworkCode, len(txList))
+	log.Printf("[%s] Processing finished successfully: processed %d blocks, found %d user transactions",
+		btc.NetworkCode, lastContinuousBlock-lastBlockHeight, len(txList))
 	return txList, nil
 }
 
 /* GetUserWallet private methods group */
-// @private deriveAddress Derive HD-wallet address by derivation index from master wallet private key
-// masterPrivateKey: Master wallet private key
-// userId: Unique user id for derivation index
-func (btc *Bitcoin) deriveAddress(masterPrivateKey string, userId uint32) (string, error) {
-	// Get seed bytes from private key
-	seed, err := hex.DecodeString(masterPrivateKey)
+// @private getWallet Get HD-wallet by index
+// wType: Wallet type (master/user)
+// wId: User id (only for user wType)
+// Returns: Derived address and private key
+func (btc *Bitcoin) getWallet(wType string, wId *uint32) (string, string, error) {
+	// Get master wallet data from Vault
+	masterData, err := vault.GetClient().GetSecret("master/" + btc.NetworkCode)
 	if err != nil {
-		return "", fmt.Errorf("invalid master key format: %w", err)
+		return "", "", fmt.Errorf("failed to get master data: %w", err)
+	}
+	mnemonic, ok := masterData["mnemonic"].(string)
+	if !ok || mnemonic == "" {
+		return "", "", fmt.Errorf("mnemonic not found in vault")
 	}
 
-	// Derive private key using BIP84 for Native SegWit
-	_, publicKey, err := btc.deriveSecp256k1Key(seed, userId)
-	if err != nil {
-		return "", fmt.Errorf("failed to derive key: %w", err)
+	// Derive wallet address and private key from master mnemonic
+	var index uint32
+	if wType == "master" {
+		index = 0
+	} else {
+		if wId == nil {
+			return "", "", fmt.Errorf("user id is required")
+		}
+		index = *wId
 	}
 
-	// Create P2WPKH address (Native SegWit - bc1...)
-	witnessProg := btcutil.Hash160(publicKey.SerializeCompressed())
-	addr, err := btcutil.NewAddressWitnessPubKeyHash(witnessProg, nil)
-	if err != nil {
-		return "", fmt.Errorf("failed to create segwit address: %w", err)
-	}
-
-	return addr.EncodeAddress(), nil
+	return btc.deriveWallet(mnemonic, index)
 }
 
-// @private deriveSecp256k1Key Bitcoin secp256k1 keys derivation for Native SegWit (BIP84)
-// seed: Seed phrase
-// userId: User id
-// Returns: privateKey, publicKey
-func (btc *Bitcoin) deriveSecp256k1Key(seed []byte, userId uint32) (*btcec.PrivateKey, *btcec.PublicKey, error) {
-	// Init master HD key for BIP32
+// @private deriveWallet Derive HD-wallet by derivation index from master wallet mnemonic
+// mnemonic: Master wallet mnemonic
+// userId: Unique user id for derivation index
+// Returns: Derived address and private key
+func (btc *Bitcoin) deriveWallet(mnemonic string, userId uint32) (string, string, error) {
+	// Convert mnemonic to seed
+	seed := bip39.NewSeed(mnemonic, "")
+
+	// Init master HD key (BIP32)
 	mac := hmac.New(sha512.New, []byte("Bitcoin seed"))
 	mac.Write(seed)
 	result := mac.Sum(nil)
 
-	key := result[:32]
-	chainCode := result[32:]
+	currentKey := result[:32]
+	currentChainCode := result[32:]
 
-	// BIP84 derivation path for Native SegWit: m/84'/0'/0'/0/{userId}
+	// BIP84: m/84'/0'/0'/0/{userId}
 	path := []uint32{
-		0x80000054, // 84' (BIP84 for Native SegWit)
-		0x80000000, // 0' for mainnet, 1' for testnet
-		0x80000000, // 0' (account)
-		0,          // 0 (external chain, non-hardened)
-		userId,     // {userId} (address index, non-hardened)
+		0x80000054, // 84'
+		0x80000000, // 0'
+		0x80000000, // 0'
+		0,          // 0
+		userId,
 	}
 
-	// Apply HMAC-SHA512 for each path level
-	currentKey := key
-	currentChainCode := chainCode
-
-	for i, index := range path {
+	// Derive child keys
+	for _, index := range path {
 		var data []byte
 
-		if index >= 0x80000000 { // Hardened derivation
-			// data = 0x00 || private_key || index
+		if index >= 0x80000000 {
 			data = make([]byte, 37)
 			data[0] = 0x00
 			copy(data[1:33], currentKey)
 			binary.BigEndian.PutUint32(data[33:], index)
-		} else { // Non-hardened derivation
-			// data = public_key || index
+		} else {
 			privKey, _ := btcec.PrivKeyFromBytes(currentKey)
-			pubKey := privKey.PubKey()
 			data = make([]byte, 37)
-			copy(data[:33], pubKey.SerializeCompressed())
+			copy(data[:33], privKey.PubKey().SerializeCompressed())
 			binary.BigEndian.PutUint32(data[33:], index)
 		}
 
-		hmacHash := hmac.New(sha512.New, currentChainCode)
-		hmacHash.Write(data)
-		result := hmacHash.Sum(nil)
+		h := hmac.New(sha512.New, currentChainCode)
+		h.Write(data)
+		result := h.Sum(nil)
 
-		// Parse the new key
-		newKey := result[:32]
-		newChainCode := result[32:]
+		childScalar := new(btcec.ModNScalar)
+		childScalar.SetByteSlice(result[:32])
 
-		// For secp256k1, need to add the parent key to the child key (modulo n)
-		if i > 0 { // Skip for master key
-			parentKey, _ := btcec.PrivKeyFromBytes(currentKey)
-			childKeyScalar := new(btcec.ModNScalar)
-			childKeyScalar.SetByteSlice(newKey)
+		parentKey, _ := btcec.PrivKeyFromBytes(currentKey)
+		childScalar.Add(&parentKey.Key)
 
-			parentScalar := new(btcec.ModNScalar)
-			parentScalar.Set(&parentKey.Key)
-
-			childKeyScalar.Add(parentScalar)
-
-			// Convert [32]byte array to []byte slice
-			keyBytes := childKeyScalar.Bytes()
-			newKey = keyBytes[:]
-		}
-
-		currentKey = newKey
-		currentChainCode = newChainCode
+		keyBytes := childScalar.Bytes()
+		currentKey = keyBytes[:]
+		currentChainCode = result[32:]
 	}
 
-	// Create final private key
+	// Create private key
 	privateKey, _ := btcec.PrivKeyFromBytes(currentKey)
 	if privateKey == nil {
-		return nil, nil, fmt.Errorf("failed to create private key")
+		return "", "", fmt.Errorf("failed to create private key")
 	}
-	// Get public key
-	publicKey := privateKey.PubKey()
 
-	return privateKey, publicKey, nil
+	// Create Native SegWit (P2WPKH) address (bc1...)
+	witnessProg := btcutil.Hash160(privateKey.PubKey().SerializeCompressed())
+	addr, err := btcutil.NewAddressWitnessPubKeyHash(witnessProg, &chaincfg.MainNetParams)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to create Native SegWit address: %w", err)
+	}
+
+	// Export private key as WIF
+	wif, err := btcutil.NewWIF(privateKey, &chaincfg.MainNetParams, true)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to create WIF: %w", err)
+	}
+
+	return addr.EncodeAddress(), wif.String(), nil
 }
 
 // @private getUTXOData Get UTXO data
