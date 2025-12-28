@@ -26,7 +26,7 @@ func NewTokensHandler(service *services.TokensService) *TokensHandler {
 }
 
 // GetTokenInfo
-// GET /api/tokens/:ticker
+// GET /api/tokens
 func (h *TokensHandler) GetTokenInfo(c *fiber.Ctx) error {
 	params := &GetTokenInfoQuery{
 		Network:  c.Query("network"),
@@ -34,12 +34,12 @@ func (h *TokensHandler) GetTokenInfo(c *fiber.Ctx) error {
 	}
 
 	if err := middleware.ValidateStruct(params); err != nil {
-		return c.JSON(err)
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
 	}
 
 	res, err := h.service.GetTokenInfo(params.Network, params.Currency)
 	if err != nil {
-		return c.JSON(err)
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"info": res})
 }

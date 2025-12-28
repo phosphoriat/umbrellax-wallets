@@ -9,6 +9,7 @@ import (
 )
 
 type Config struct {
+	AppEnv  string
 	AppUrl  string
 	AppPort string
 	// PostgreSQL
@@ -82,6 +83,7 @@ func Load() (*Config, error) {
 	}
 
 	return &Config{
+		AppEnv:  getEnv("APP_ENV", ""),
 		AppUrl:  getEnv("APP_URL", ""),
 		AppPort: getEnv("APP_PORT", ""),
 		// PostgreSQL

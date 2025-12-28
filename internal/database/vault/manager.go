@@ -215,6 +215,7 @@ func (c *Client) authWithAppRole(roleId string, secretId string) error {
 
 	// Set the token from the response
 	client.SetToken(resp.Auth.ClientToken)
+	log.Printf("Vault token info: TTL=%d, Renewable=%v", resp.Auth.LeaseDuration, resp.Auth.Renewable)
 
 	return nil
 }

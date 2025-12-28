@@ -53,7 +53,8 @@ type (
 	// ChainService Chain interface with all methods
 	ChainService interface {
 		GetCode() string
-		GetUserWallet(userId uint32) (string, error)
+		GetUserWalletAddress(userId uint32) (string, error)
+		GetUserWallet(userId uint32) (map[string]any, error)
 		GetMasterWallet() (map[string]any, error)
 		GetTransactionCommission(oType, wType string, wId *uint32, currency, to string, amount float64, memo string) (map[string]float64, error)
 		GetTransactionStatus(hash, toAddr string) (string, error)

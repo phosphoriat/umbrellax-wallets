@@ -99,10 +99,11 @@ func (ton *Ton) GetCode() string {
 	return ton.NetworkCode
 }
 
-// GetUserWallet Get user HD-wallet by user id
+// GetUserWalletAddress Get user HD-wallet by user id
+// @note In TON no user wallets, so this method returns master wallet address (for using MEMO tags)
 // userId: Unique user id
-// Returns: Master wallet address (for using MEMO tags)
-func (ton *Ton) GetUserWallet(userId uint32) (string, error) {
+// Returns: Master wallet address
+func (ton *Ton) GetUserWalletAddress(userId uint32) (string, error) {
 	// Get master wallet data from Vault
 	masterData, err := vault.GetClient().GetSecret("master/" + ton.NetworkCode)
 	if err != nil {
@@ -114,6 +115,27 @@ func (ton *Ton) GetUserWallet(userId uint32) (string, error) {
 	}
 
 	return masterAddr, nil
+}
+
+// GetUserWallet Get user wallet info (address and token balances)
+// @note In TON no user wallets, so this method returns null balances
+// userId: Unique user id
+// Returns: Master address and null balances
+func (ton *Ton) GetUserWallet(userId uint32) (map[string]any, error) {
+	// Get master wallet info from Vault
+	masterData, err := vault.GetClient().GetSecret("master/" + ton.NetworkCode)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get master data: %w", err)
+	}
+	masterAddr, ok := masterData["address"].(string)
+	if !ok || masterAddr == "" {
+		return nil, fmt.Errorf("master address not found in Vault")
+	}
+
+	return map[string]any{
+		"address":  masterAddr,
+		"balances": map[string]any{},
+	}, nil
 }
 
 // GetMasterWallet Get master wallet info (address and token balances)
@@ -132,7 +154,7 @@ func (ton *Ton) GetMasterWallet() (map[string]any, error) {
 	if !ok || masterMnemonic == "" {
 		return nil, fmt.Errorf("master mnemonic not found in Vault")
 	}
-	seedWords := strings.Split(masterMnemonic, "")
+	seedWords := strings.Split(masterMnemonic, " ")
 
 	// Init wallet instance
 	walletInstance, err := wallet.FromSeedWithOptions(ton.Client, seedWords, ton.WalletVersion)
@@ -143,12 +165,19 @@ func (ton *Ton) GetMasterWallet() (map[string]any, error) {
 	// Get Jetton token balances
 	balances := make(map[string]any)
 	for token, contractAddr := range config.ContractsAddresses[ton.NetworkCode] {
-		tokenBalance, _ := ton.getJettonBalance(token, contractAddr, masterAddr)
+		tokenBalance, err := ton.getJettonBalance(token, contractAddr, masterAddr)
+		if err != nil {
+			continue
+		}
+
 		balances[token] = tokenBalance
 	}
 
 	// Get TON native balance
-	tonBalance, _ := ton.getNativeBalance(walletInstance)
+	tonBalance, err := ton.getNativeBalance(walletInstance)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get native balance: %w", err)
+	}
 	balances[ton.NativeToken] = tonBalance
 
 	return map[string]any{
@@ -177,7 +206,7 @@ func (ton *Ton) GetTransactionCommission(oType, wType string, wId *uint32, curre
 	if !ok || mnemonic == "" {
 		return nil, fmt.Errorf("invalid or missing %s wallet mnemonic in Vault", ton.NetworkCode)
 	}
-	seedWords := strings.Split(mnemonic, "")
+	seedWords := strings.Split(mnemonic, " ")
 
 	// Init wallet instance
 	walletInstance, err := wallet.FromSeedWithOptions(ton.Client, seedWords, ton.WalletVersion)
@@ -309,7 +338,7 @@ func (ton *Ton) SendTransaction(wType string, wId *uint32, currency, toAddr stri
 	}
 
 	// Init wallet instance
-	seedWords := strings.Split(mnemonic, "")
+	seedWords := strings.Split(mnemonic, " ")
 	walletInstance, err := wallet.FromSeedWithOptions(ton.Client, seedWords, ton.WalletVersion)
 	if err != nil {
 		return "", fmt.Errorf("failed to initialize wallet: %w", err)
@@ -699,6 +728,10 @@ func (ton *Ton) calcNativeFee(walletInstance *wallet.Wallet, toAddr string, amou
 		body,                          // Message payload
 	))
 	if err != nil {
+		// Fallback - wallet not initialized
+		if strings.Contains(err.Error(), "not initialized") {
+			return 0.01, nil // ~0.01 TON typical fee
+		}
 		return 0, fmt.Errorf("failed to build external message: %w", err)
 	}
 
@@ -716,6 +749,7 @@ func (ton *Ton) calcNativeFee(walletInstance *wallet.Wallet, toAddr string, amou
 func (ton *Ton) calcJettonFee(walletInstance *wallet.Wallet, currency, toAddr string, amount float64, memo string) (float64, error) {
 	ctx := context.Background()
 	currency = strings.ToUpper(currency)
+	networkCfg, _ := config.GetNetworkConfig(ton.NetworkCode)
 
 	// Get token contract address
 	contractAddr, ok := config.GetContractAddress(ton.NetworkCode, currency)
@@ -729,12 +763,16 @@ func (ton *Ton) calcJettonFee(walletInstance *wallet.Wallet, currency, toAddr st
 	// Get jetton wallet
 	jettonWallet, err := jettonMaster.GetJettonWallet(ctx, walletInstance.WalletAddress())
 	if err != nil {
+		// Fallback - wallet not initialized or no jetton wallet
+		if strings.Contains(err.Error(), "not initialized") || strings.Contains(err.Error(), "exit code") {
+			return networkCfg.FallbackFee, nil // ~0.05 TON for jetton transfer
+		}
 		return 0, fmt.Errorf("failed to get jetton wallet: %w", err)
 	}
 
 	// Get forward fee and message fee from config
-	forwardTonAmount := tlb.MustFromTON(config.NetworkSettings[ton.NetworkCode].ForwardFee)
-	messageTonAmount := tlb.MustFromTON(config.NetworkSettings[ton.NetworkCode].MessageFee)
+	forwardTonAmount := tlb.MustFromTON(networkCfg.ForwardFee)
+	messageTonAmount := tlb.MustFromTON(networkCfg.MessageFee)
 
 	// Get jetton decimals from config
 	decimals := config.TokenSettings[ton.NetworkCode][currency].Decimals
@@ -770,6 +808,10 @@ func (ton *Ton) calcJettonFee(walletInstance *wallet.Wallet, currency, toAddr st
 		payload,                // Transfer payload
 	))
 	if err != nil {
+		// Fallback - wallet not initialized
+		if strings.Contains(err.Error(), "not initialized") {
+			return networkCfg.FallbackFee, nil // ~0.05 TON for jetton transfer
+		}
 		return 0, fmt.Errorf("failed to build external message: %w", err)
 	}
 
@@ -900,6 +942,7 @@ func (ton *Ton) sendNative(walletInstance *wallet.Wallet, toAddr string, amount 
 func (ton *Ton) sendJetton(currency string, walletInstance *wallet.Wallet, toAddr string, amount float64, memo string) (string, error) {
 	ctx := context.Background()
 	currency = strings.ToUpper(currency)
+	networkCfg, _ := config.GetNetworkConfig(ton.NetworkCode)
 
 	// Get token contract address from config
 	contractAddr, ok := config.GetContractAddress(ton.NetworkCode, currency)
@@ -917,8 +960,8 @@ func (ton *Ton) sendJetton(currency string, walletInstance *wallet.Wallet, toAdd
 	}
 
 	// Get forward fee and message fee from config
-	forwardTonAmount := tlb.MustFromTON(config.NetworkSettings[ton.NetworkCode].ForwardFee)
-	messageTonAmount := tlb.MustFromTON(config.NetworkSettings[ton.NetworkCode].MessageFee)
+	forwardTonAmount := tlb.MustFromTON(networkCfg.ForwardFee)
+	messageTonAmount := tlb.MustFromTON(networkCfg.MessageFee)
 
 	// Get jetton decimals from config
 	decimals := config.TokenSettings[ton.NetworkCode][currency].Decimals

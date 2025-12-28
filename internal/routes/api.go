@@ -11,10 +11,11 @@ import (
 func SetupRoutes(app *fiber.App) {
 	// Init repositories
 	walletRepo := repository.NewWalletRepository()
+	userRepo := repository.NewUserRepository()
 
 	// Init routes handlers
 	tokensHandler := handlers.NewTokensHandler(services.NewTokensService())
-	walletsHandler := handlers.NewWalletsHandler(services.NewWalletsService(walletRepo))
+	walletsHandler := handlers.NewWalletsHandler(services.NewWalletsService(walletRepo, userRepo))
 	transactionsHandler := handlers.NewTransactionsHandler(services.NewTransactionsService())
 
 	// Set api routes group
@@ -27,12 +28,13 @@ func SetupRoutes(app *fiber.App) {
 
 	// Tokens routes group
 	tokens := api.Group("/tokens")
-	tokens.Get("/:ticker", tokensHandler.GetTokenInfo)
+	tokens.Get("/", tokensHandler.GetTokenInfo)
 
 	// Wallets routes group
 	wallets := api.Group("/wallets")
-	wallets.Get("/", walletsHandler.GetUserWallet)
-	wallets.Get("/master", walletsHandler.GetMasterWallet)
+	wallets.Get("/", walletsHandler.GetUserWalletAddress)
+	wallets.Get("/user", walletsHandler.GetUserWalletInfo)
+	wallets.Get("/master", walletsHandler.GetMasterWalletInfo)
 
 	// Transactions routes group
 	transactions := api.Group("/transactions")

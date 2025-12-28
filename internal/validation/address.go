@@ -8,13 +8,15 @@ import (
 
 // AddressValidator Validation rule for address
 func AddressValidator(fl validator.FieldLevel) bool {
-	query := fl.Parent().Interface().(struct {
-		Network string
-		Hash    string
-		To      string
-	})
-	addr := query.To
-	network := query.Network
+	// Get address field
+	addr := fl.Field().String()
+
+	// Get network field from parent struct
+	networkField := fl.Parent().FieldByName("Network")
+	if !networkField.IsValid() {
+		return false
+	}
+	network := networkField.String()
 
 	switch network {
 	case "ethereum", "bsc":

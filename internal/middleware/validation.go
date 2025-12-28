@@ -28,7 +28,7 @@ type (
 
 var validate = validator.New()
 
-func (v XValidator) Validate(data interface{}) []ErrorResponse {
+func (v XValidator) Validate(data any) []ErrorResponse {
 	var validationErrors []ErrorResponse
 
 	errs := validate.Struct(data)
@@ -59,7 +59,7 @@ func NewValidator() *XValidator {
 
 // ValidateStruct
 // Validate struct and return Fiber validation errors, if exists
-func ValidateStruct(params interface{}) error {
+func ValidateStruct(params any) error {
 	myValidator := NewValidator()
 
 	if errors := myValidator.Validate(params); len(errors) > 0 && errors[0].Error {

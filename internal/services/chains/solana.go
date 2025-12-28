@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/sha512"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
@@ -84,9 +85,10 @@ func (sol *Solana) GetCode() string {
 	return sol.NetworkCode
 }
 
-// GetUserWallet Get user HD-wallet by user id
+// GetUserWalletAddress Get user HD-wallet by user id
 // userId: Unique user id
-func (sol *Solana) GetUserWallet(userId uint32) (string, error) {
+// Returns: User HD-wallet address
+func (sol *Solana) GetUserWalletAddress(userId uint32) (string, error) {
 	// Get master wallet data from Vault
 	masterData, err := vault.GetClient().GetSecret("master/" + sol.NetworkCode)
 	if err != nil {
@@ -105,7 +107,42 @@ func (sol *Solana) GetUserWallet(userId uint32) (string, error) {
 	return addr, nil
 }
 
+// GetUserWallet Get user wallet info (address and token balances)
+// userId: Unique user id
+// Returns: Map of user wallet info (address and balances of all available tokens)
+func (sol *Solana) GetUserWallet(userId uint32) (map[string]any, error) {
+	// Get user wallet address
+	userAddr, _, err := sol.getWallet("user", &userId)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user wallet address: %w", err)
+	}
+
+	// Get SPL token balances
+	balances := make(map[string]any)
+	for tokenName, contractAddr := range config.ContractsAddresses[sol.NetworkCode] {
+		tokenBalance, err := sol.getSplBalance(contractAddr, userAddr)
+		if err != nil {
+			continue
+		}
+
+		balances[tokenName] = tokenBalance
+	}
+
+	// Get SOL native balance
+	solBalance, err := sol.getNativeBalance(userAddr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get native balance: %w", err)
+	}
+	balances[sol.NativeToken] = solBalance
+
+	return map[string]any{
+		"address":  userAddr,
+		"balances": balances,
+	}, nil
+}
+
 // GetMasterWallet Get master wallet info (address and token balances)
+// Returns: Map of master wallet info (address and balances of all available tokens)
 func (sol *Solana) GetMasterWallet() (map[string]any, error) {
 	// Get master wallet address from Vault
 	masterData, err := vault.GetClient().GetSecret("master/" + sol.NetworkCode)
@@ -120,12 +157,19 @@ func (sol *Solana) GetMasterWallet() (map[string]any, error) {
 	// Get SPL token balances
 	balances := make(map[string]any)
 	for tokenName, contractAddr := range config.ContractsAddresses[sol.NetworkCode] {
-		tokenBalance, _ := sol.getSplBalance(contractAddr, masterAddr)
+		tokenBalance, err := sol.getSplBalance(contractAddr, masterAddr)
+		if err != nil {
+			continue
+		}
+
 		balances[tokenName] = tokenBalance
 	}
 
 	// Get SOL native balance
-	solBalance, _ := sol.getNativeBalance(masterAddr)
+	solBalance, err := sol.getNativeBalance(masterAddr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get native balance: %w", err)
+	}
 	balances[sol.NativeToken] = solBalance
 
 	return map[string]any{
@@ -891,7 +935,8 @@ func (sol *Solana) calcNativeFee(fromAddr, toAddr string, amount float64) (float
 		return 0, fmt.Errorf("failed to marshal message: %w", err)
 	}
 	// Get fee for message
-	feeResult, err := sol.Client.GetFeeForMessage(ctx, string(message), rpc.CommitmentFinalized)
+	messageBase64 := base64.StdEncoding.EncodeToString(message)
+	feeResult, err := sol.Client.GetFeeForMessage(ctx, messageBase64, rpc.CommitmentFinalized)
 	if err != nil || feeResult.Value == nil {
 		return 0, fmt.Errorf("failed to get fee: %w", err)
 	}
@@ -1012,7 +1057,8 @@ func (sol *Solana) calcSplFee(currency, fromAddr, toAddr string, amount float64)
 	}
 
 	// Get fee for message
-	feeResult, err := sol.Client.GetFeeForMessage(ctx, string(message), rpc.CommitmentFinalized)
+	messageBase64 := base64.StdEncoding.EncodeToString(message)
+	feeResult, err := sol.Client.GetFeeForMessage(ctx, messageBase64, rpc.CommitmentFinalized)
 	if err != nil || feeResult.Value == nil {
 		return 0, fmt.Errorf("failed to get fee: %w", err)
 	}

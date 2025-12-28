@@ -96,10 +96,10 @@ func (bsc *Bsc) GetCode() string {
 	return bsc.NetworkCode
 }
 
-// GetUserWallet Get user HD-wallet by user id
+// GetUserWalletAddress Get user HD-wallet by user id
 // userId: Unique user id
 // Returns: User HD-wallet address
-func (bsc *Bsc) GetUserWallet(userId uint32) (string, error) {
+func (bsc *Bsc) GetUserWalletAddress(userId uint32) (string, error) {
 	// Get master wallet data from Vault
 	masterData, err := vault.GetClient().GetSecret("master/" + bsc.NetworkCode)
 	if err != nil {
@@ -119,6 +119,40 @@ func (bsc *Bsc) GetUserWallet(userId uint32) (string, error) {
 	return addr, nil
 }
 
+// GetUserWallet Get user wallet info (address and token balances)
+// userId: Unique user id
+// Returns: Map of user wallet info (address and balances of all available tokens)
+func (bsc *Bsc) GetUserWallet(userId uint32) (map[string]any, error) {
+	// Get user wallet address
+	userAddr, _, err := bsc.getWallet("user", &userId)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user wallet address: %w", err)
+	}
+
+	// Get BEP20 token balances
+	balances := make(map[string]any)
+	for token, contractAddr := range config.ContractsAddresses[bsc.NetworkCode] {
+		tokenBalance, err := bsc.getBep20Balance(contractAddr, userAddr)
+		if err != nil {
+			continue
+		}
+
+		balances[token] = tokenBalance
+	}
+
+	// Get BNB native balance
+	bnbBalance, err := bsc.getNativeBalance(userAddr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get native balance: %w", err)
+	}
+	balances[bsc.NativeToken] = bnbBalance
+
+	return map[string]any{
+		"address":  userAddr,
+		"balances": balances,
+	}, nil
+}
+
 // GetMasterWallet Get master wallet info (address and token balances)
 // Returns: Map of master wallet info (address and balances of all available tokens)
 func (bsc *Bsc) GetMasterWallet() (map[string]any, error) {
@@ -135,13 +169,20 @@ func (bsc *Bsc) GetMasterWallet() (map[string]any, error) {
 	// Get BEP20 token balances
 	balances := make(map[string]any)
 	for token, contractAddr := range config.ContractsAddresses[bsc.NetworkCode] {
-		tokenBalance, _ := bsc.getBep20Balance(contractAddr, masterAddr)
+		tokenBalance, err := bsc.getBep20Balance(contractAddr, masterAddr)
+		if err != nil {
+			continue
+		}
+
 		balances[token] = tokenBalance
 	}
 
-	// Get ETH native balance
-	ethBalance, _ := bsc.getNativeBalance(masterAddr)
-	balances[bsc.NativeToken] = ethBalance
+	// Get BNB native balance
+	bnbBalance, err := bsc.getNativeBalance(masterAddr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get native balance: %w", err)
+	}
+	balances[bsc.NativeToken] = bnbBalance
 
 	return map[string]any{
 		"address":  masterAddr,
@@ -668,22 +709,9 @@ func (bsc *Bsc) getBep20Balance(contractAddr, addr string) (float64, error) {
 func (bsc *Bsc) calcNativeFee(fromAddr, toAddr string, amount float64) (float64, error) {
 	// Get BNB decimals from config
 	bnbDecimals := config.TokenSettings[bsc.NetworkCode]["BNB"].Decimals
-	// Convert amount to WEI
-	amountWei := utils.ApplyDecimals(amount, int64(bnbDecimals))
 
-	// Get converted from and to addresses
-	from := common.HexToAddress(fromAddr)
-	to := common.HexToAddress(toAddr)
-
-	// Get estimated gas limit
-	gasLimit, err := bsc.Client.EstimateGas(context.Background(), ethereum.CallMsg{
-		From:  from,
-		To:    &to,
-		Value: amountWei,
-	})
-	if err != nil {
-		return 0, fmt.Errorf("failed to get estimate gas limit: %w", err)
-	}
+	// Gas for native transfers is always 21000 (EVM level constant)
+	gasLimit := uint64(21000)
 
 	// Get current gas price
 	gasPrice, err := bsc.Client.SuggestGasPrice(context.Background())
@@ -721,7 +749,7 @@ func (bsc *Bsc) calcBep20Fee(currency, fromAddr, toAddr string, amount float64) 
 	if err != nil {
 		return 0, fmt.Errorf("failed to get contract decimals: %w", err)
 	}
-	decimalsValue := *abi.ConvertType(out[0], new(int64)).(*int64)
+	decimalsValue := int64(*abi.ConvertType(out[0], new(uint8)).(*uint8))
 	// Convert amount to WEI with contract decimals
 	amountWei := utils.ApplyDecimals(amount, decimalsValue)
 
@@ -731,7 +759,8 @@ func (bsc *Bsc) calcBep20Fee(currency, fromAddr, toAddr string, amount float64) 
 	// Set params for transfer contract call
 	data, err := bsc.ABI.Pack("transfer", to, amountWei)
 
-	// Get estimated gas limit
+	// Try to estimate gas limit, fallback to 65000
+	cfg, _ := config.GetNetworkConfig(bsc.NetworkCode)
 	gasLimit, err := bsc.Client.EstimateGas(context.Background(), ethereum.CallMsg{
 		From:  common.HexToAddress(fromAddr),
 		To:    &contractAddress,
@@ -739,10 +768,10 @@ func (bsc *Bsc) calcBep20Fee(currency, fromAddr, toAddr string, amount float64) 
 		Data:  data,
 	})
 	if err != nil {
-		return 0, fmt.Errorf("failed to get estimate gas limit: %w", err)
+		gasLimit = uint64(cfg.GasLimit)
+	} else {
+		gasLimit = gasLimit + (gasLimit / uint64(cfg.FeeBuffer)) // +10% buffer
 	}
-	// Apply 10% buffer gas limit
-	gasLimit = gasLimit + (gasLimit / 10)
 
 	// Get current gas price
 	gasPrice, err := bsc.Client.SuggestGasPrice(context.Background())
@@ -787,19 +816,11 @@ func (bsc *Bsc) sendNative(fromAddr, toAddr string, amount float64, privateKey s
 	// Convert amount to WEI
 	amountWei := utils.ApplyDecimals(amount, int64(bnbDecimals))
 
-	// Get converted from and to address
-	from := common.HexToAddress(fromAddr)
+	// Get converted to address
 	to := common.HexToAddress(toAddr)
 
-	// Get estimated gas limit
-	gasLimit, err := bsc.Client.EstimateGas(context.Background(), ethereum.CallMsg{
-		From:  from,
-		To:    &to,
-		Value: amountWei,
-	})
-	if err != nil {
-		return "", fmt.Errorf("failed to get estimate gas limit: %w", err)
-	}
+	// Gas for native transfers is always 21000 (EVM level constant)
+	gasLimit := uint64(21000)
 
 	// Get current gas price
 	gasPrice, err := bsc.Client.SuggestGasPrice(context.Background())
@@ -884,7 +905,8 @@ func (bsc *Bsc) sendBep20(currency, fromAddr, toAddr string, amount float64, pri
 	// Set params for transfer contract call
 	data, err := bsc.ABI.Pack("transfer", to, amountWei)
 
-	// Get estimated gas limit
+	// Try to estimate gas limit, fallback to 65000
+	cfg, _ := config.GetNetworkConfig(bsc.NetworkCode)
 	gasLimit, err := bsc.Client.EstimateGas(context.Background(), ethereum.CallMsg{
 		From:  common.HexToAddress(fromAddr),
 		To:    &contractAddress,
@@ -892,10 +914,10 @@ func (bsc *Bsc) sendBep20(currency, fromAddr, toAddr string, amount float64, pri
 		Data:  data,
 	})
 	if err != nil {
-		return "", fmt.Errorf("failed to get estimate gas limit: %w", err)
+		gasLimit = uint64(cfg.GasLimit)
+	} else {
+		gasLimit = gasLimit + (gasLimit / uint64(cfg.FeeBuffer)) // +10% buffer
 	}
-	// Apply 10% buffer gas limit
-	gasLimit = gasLimit + (gasLimit / 10)
 
 	// Get current gas price
 	gasPrice, err := bsc.Client.SuggestGasPrice(context.Background())

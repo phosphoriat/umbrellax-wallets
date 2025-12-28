@@ -97,10 +97,10 @@ func (eth *Ethereum) GetCode() string {
 	return eth.NetworkCode
 }
 
-// GetUserWallet Get user HD-wallet by user id
+// GetUserWalletAddress Get user HD-wallet by user id
 // userId: Unique user id
 // Returns: User HD-wallet address
-func (eth *Ethereum) GetUserWallet(userId uint32) (string, error) {
+func (eth *Ethereum) GetUserWalletAddress(userId uint32) (string, error) {
 	// Get master wallet data from Vault
 	masterData, err := vault.GetClient().GetSecret("master/" + eth.NetworkCode)
 	if err != nil {
@@ -120,6 +120,40 @@ func (eth *Ethereum) GetUserWallet(userId uint32) (string, error) {
 	return addr, nil
 }
 
+// GetUserWallet Get user wallet info (address and token balances)
+// userId: Unique user id
+// Returns: Map of user wallet info (address and balances of all available tokens)
+func (eth *Ethereum) GetUserWallet(userId uint32) (map[string]any, error) {
+	// Get user wallet address
+	userAddr, _, err := eth.getWallet("user", &userId)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user wallet address: %w", err)
+	}
+
+	// Get ERC20 token balances
+	balances := make(map[string]any)
+	for token, contractAddr := range config.ContractsAddresses[eth.NetworkCode] {
+		tokenBalance, err := eth.getErc20Balance(contractAddr, userAddr)
+		if err != nil {
+			continue
+		}
+
+		balances[token] = tokenBalance
+	}
+
+	// Get ETH native balance
+	ethBalance, err := eth.getNativeBalance(userAddr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get native balance: %w", err)
+	}
+	balances[eth.NativeToken] = ethBalance
+
+	return map[string]any{
+		"address":  userAddr,
+		"balances": balances,
+	}, nil
+}
+
 // GetMasterWallet Get master wallet info (address and token balances)
 // Returns: Map of master wallet info (address and balances of all available tokens)
 func (eth *Ethereum) GetMasterWallet() (map[string]any, error) {
@@ -136,12 +170,19 @@ func (eth *Ethereum) GetMasterWallet() (map[string]any, error) {
 	// Get ERC20 token balances
 	balances := make(map[string]any)
 	for token, contractAddr := range config.ContractsAddresses[eth.NetworkCode] {
-		tokenBalance, _ := eth.getErc20Balance(contractAddr, masterAddr)
+		tokenBalance, err := eth.getErc20Balance(contractAddr, masterAddr)
+		if err != nil {
+			continue
+		}
+
 		balances[token] = tokenBalance
 	}
 
 	// Get ETH native balance
-	ethBalance, _ := eth.getNativeBalance(masterAddr)
+	ethBalance, err := eth.getNativeBalance(masterAddr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get native balance: %w", err)
+	}
 	balances[eth.NativeToken] = ethBalance
 
 	return map[string]any{
@@ -666,22 +707,9 @@ func (eth *Ethereum) getErc20Balance(contractAddr, addr string) (float64, error)
 func (eth *Ethereum) calcNativeFee(fromAddr, toAddr string, amount float64) (float64, error) {
 	// Get ETH decimals from config
 	ethDecimals := config.TokenSettings[eth.NetworkCode]["ETH"].Decimals
-	// Convert amount to WEI
-	amountWei := utils.ApplyDecimals(amount, int64(ethDecimals))
 
-	// Get converted from and to addresses
-	from := common.HexToAddress(fromAddr)
-	to := common.HexToAddress(toAddr)
-
-	// Get estimated gas limit
-	gasLimit, err := eth.Client.EstimateGas(context.Background(), ethereum.CallMsg{
-		From:  from,
-		To:    &to,
-		Value: amountWei,
-	})
-	if err != nil {
-		return 0, fmt.Errorf("failed to get estimate gas limit: %w", err)
-	}
+	// Gas for native transfers is always 21000 (EVM level constant)
+	gasLimit := uint64(21000)
 
 	// Get current gas price
 	gasPrice, err := eth.Client.SuggestGasPrice(context.Background())
@@ -719,7 +747,7 @@ func (eth *Ethereum) calcErc20Fee(currency, fromAddr, toAddr string, amount floa
 	if err != nil {
 		return 0, fmt.Errorf("failed to get contract decimals: %w", err)
 	}
-	decimalsValue := *abi.ConvertType(out[0], new(int64)).(*int64)
+	decimalsValue := int64(*abi.ConvertType(out[0], new(uint8)).(*uint8))
 	// Convert amount to WEI with contract decimals
 	amountWei := utils.ApplyDecimals(amount, decimalsValue)
 
@@ -729,7 +757,8 @@ func (eth *Ethereum) calcErc20Fee(currency, fromAddr, toAddr string, amount floa
 	// Set params for transfer contract call
 	data, err := eth.ABI.Pack("transfer", to, amountWei)
 
-	// Get estimated gas limit
+	// Try to estimate gas limit, fallback to 65000
+	cfg, _ := config.GetNetworkConfig(eth.NetworkCode)
 	gasLimit, err := eth.Client.EstimateGas(context.Background(), ethereum.CallMsg{
 		From:  common.HexToAddress(fromAddr),
 		To:    &contractAddress,
@@ -737,10 +766,10 @@ func (eth *Ethereum) calcErc20Fee(currency, fromAddr, toAddr string, amount floa
 		Data:  data,
 	})
 	if err != nil {
-		return 0, fmt.Errorf("failed to get estimate gas limit: %w", err)
+		gasLimit = uint64(cfg.GasLimit)
+	} else {
+		gasLimit = gasLimit + (gasLimit * uint64(cfg.FeeBuffer)) // +10% buffer
 	}
-	// Apply 10% buffer gas limit
-	gasLimit = gasLimit + (gasLimit / 10)
 
 	// Get current gas price
 	gasPrice, err := eth.Client.SuggestGasPrice(context.Background())
@@ -784,19 +813,11 @@ func (eth *Ethereum) sendNative(fromAddr, toAddr string, amount float64, private
 	// Convert amount to WEI
 	amountWei := utils.ApplyDecimals(amount, int64(ethDecimals))
 
-	// Get converted from and to address
-	from := common.HexToAddress(fromAddr)
+	// Get converted to address
 	to := common.HexToAddress(toAddr)
 
-	// Get estimated gas limit
-	gasLimit, err := eth.Client.EstimateGas(context.Background(), ethereum.CallMsg{
-		From:  from,
-		To:    &to,
-		Value: amountWei,
-	})
-	if err != nil {
-		return "", fmt.Errorf("failed to get estimate gas limit: %w", err)
-	}
+	// Gas for native transfers is always 21000 (EVM level constant)
+	gasLimit := uint64(21000)
 
 	// Get current gas price
 	gasPrice, err := eth.Client.SuggestGasPrice(context.Background())
@@ -856,10 +877,12 @@ func (eth *Ethereum) sendErc20(currency, fromAddr, toAddr string, amount float64
 	}
 	// Check ETH and currency balances before sending
 	if ethBalance < txFee {
-		return "", fmt.Errorf("insufficient ETH balance: have %f %s, need %f %s", ethBalance, "ETH", txFee, "ETH")
+		return "", fmt.Errorf("insufficient ETH balance: have %f %s, need %f %s",
+			ethBalance, "ETH", txFee, "ETH")
 	}
 	if erc20Balance < amount {
-		return "", fmt.Errorf("insufficient currency balance: have %f %s, need %f %s", erc20Balance, currency, amount, currency)
+		return "", fmt.Errorf("insufficient currency balance: have %f %s, need %f %s",
+			erc20Balance, currency, amount, currency)
 	}
 
 	// Get contract instance
@@ -881,7 +904,8 @@ func (eth *Ethereum) sendErc20(currency, fromAddr, toAddr string, amount float64
 	// Set params for transfer contract call
 	data, err := eth.ABI.Pack("transfer", to, amountWei)
 
-	// Get estimated gas limit
+	// Try to estimate gas limit, fallback to 65000
+	cfg, _ := config.GetNetworkConfig(eth.NetworkCode)
 	gasLimit, err := eth.Client.EstimateGas(context.Background(), ethereum.CallMsg{
 		From:  common.HexToAddress(fromAddr),
 		To:    &contractAddress,
@@ -889,10 +913,10 @@ func (eth *Ethereum) sendErc20(currency, fromAddr, toAddr string, amount float64
 		Data:  data,
 	})
 	if err != nil {
-		return "", fmt.Errorf("failed to get estimate gas limit: %w", err)
+		gasLimit = uint64(cfg.GasLimit)
+	} else {
+		gasLimit = gasLimit + (gasLimit / uint64(cfg.FeeBuffer)) // +10% buffer
 	}
-	// Apply 10% buffer gas limit
-	gasLimit = gasLimit + (gasLimit / 10)
 
 	// Get current gas price
 	gasPrice, err := eth.Client.SuggestGasPrice(context.Background())

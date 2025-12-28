@@ -7,10 +7,12 @@ type (
 		NativeToken  string
 		BybitAddress string
 		FeeBuffer    float64
+		GasLimit     int
 		BlockTime    int
 		ABI          string
 		ForwardFee   string
 		MessageFee   string
+		FallbackFee  float64
 	}
 
 	TokenConfig struct {
@@ -55,6 +57,7 @@ var NetworkSettings = map[string]NetworkConfig{
 		NativeToken:  "ETH",
 		BybitAddress: "0x0182f8cff05f1554ccbc14cbe06c5a8973c85c31",
 		FeeBuffer:    0.1,
+		GasLimit:     65000,
 		BlockTime:    12,
 	},
 	"bsc": {
@@ -62,6 +65,7 @@ var NetworkSettings = map[string]NetworkConfig{
 		NativeToken:  "BNB",
 		BybitAddress: "0x0182f8cff05f1554ccbc14cbe06c5a8973c85c31",
 		FeeBuffer:    0.05,
+		GasLimit:     65000,
 		BlockTime:    1,
 	},
 	"ton": {
@@ -70,6 +74,7 @@ var NetworkSettings = map[string]NetworkConfig{
 		FeeBuffer:    0.05,
 		ForwardFee:   "0.02",
 		MessageFee:   "0.01",
+		FallbackFee:  0.05,
 		BlockTime:    5,
 	},
 	"bitcoin": {

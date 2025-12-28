@@ -43,9 +43,10 @@ func (r *UserRepository) GetUserIdByNumber(number string) (uint, error) {
 	return user.UserId, nil
 }
 
-// Create new user
-func (r *UserRepository) Create(user *models.User) (*models.User, error) {
-	err := r.db.Create(user).Error
+// FirstOrCreate Create new user, if not exists
+func (r *UserRepository) FirstOrCreate(user *models.User) (*models.User, error) {
+	err := r.db.Where("user_id = ?", user.UserId).
+		FirstOrCreate(user).Error
 	if err != nil {
 		return nil, err
 	}

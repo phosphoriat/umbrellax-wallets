@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -24,13 +25,35 @@ import (
 )
 
 func main() {
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	// Load config
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatal("Failed to load config from env")
+		log.Fatal("Failed to load config from env:", err)
 	}
+
+	// Setup logs output
+	appLogFile, err := os.OpenFile("../logs/wallets.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	if err != nil {
+		log.Fatalf("Failed to open app log file: %v", err)
+	}
+	defer appLogFile.Close()
+
+	errLogFile, err := os.OpenFile("../logs/error.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	if err != nil {
+		log.Fatalf("Failed to open error log file: %v", err)
+	}
+	defer errLogFile.Close()
+
+	var appLogOutput io.Writer
+	if cfg.AppEnv == "production" {
+		appLogOutput = appLogFile
+	} else {
+		appLogOutput = io.MultiWriter(os.Stdout, appLogFile)
+	}
+	log.SetOutput(appLogOutput)
 
 	/* Init services */
 	// Init ClickHouse
@@ -76,16 +99,10 @@ func main() {
 
 	/* Middleware */
 	// Logger middleware
-	errorLogFile, err := os.OpenFile("../logs/errors.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
-	if err != nil {
-		log.Fatalf("error opening error log file: %v", err)
-	}
-	defer errorLogFile.Close()
-
 	app.Use(logger.New(logger.Config{
 		Format:     "[${time}] ERROR ${status} - ${method} ${path} - Error: ${error}\n",
 		TimeFormat: "02.01.2006 15:04:05",
-		Output:     errorLogFile,
+		Output:     errLogFile,
 		Next: func(c *fiber.Ctx) bool {
 			return c.Response().StatusCode() < 400
 		},

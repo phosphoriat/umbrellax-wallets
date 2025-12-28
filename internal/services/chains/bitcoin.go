@@ -96,9 +96,10 @@ func (btc *Bitcoin) GetCode() string {
 	return btc.NetworkCode
 }
 
-// GetUserWallet Get user HD-wallet by user id
+// GetUserWalletAddress Get user HD-wallet by user id
 // userId: Unique user id
-func (btc *Bitcoin) GetUserWallet(userId uint32) (string, error) {
+// Returns: User HD-wallet address
+func (btc *Bitcoin) GetUserWalletAddress(userId uint32) (string, error) {
 	// Get master wallet data from Vault
 	masterData, err := vault.GetClient().GetSecret("master/" + btc.NetworkCode)
 	if err != nil {
@@ -117,7 +118,48 @@ func (btc *Bitcoin) GetUserWallet(userId uint32) (string, error) {
 	return addr, nil
 }
 
+// GetUserWallet Get user wallet info (address and token balances)
+// userId: Unique user id
+// Returns: Map of user wallet info (address and balances of all available tokens)
+func (btc *Bitcoin) GetUserWallet(userId uint32) (map[string]any, error) {
+	// Get user wallet address
+	userAddr, _, err := btc.getWallet("user", &userId)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user wallet address: %w", err)
+	}
+
+	// Parse and validate user address
+	addr, err := btcutil.DecodeAddress(userAddr, btc.ChainParams)
+	if err != nil {
+		return nil, fmt.Errorf("invalid user address: %w", err)
+	}
+
+	// Get UXTO for the user address
+	unspentList, err := btc.Client.ListUnspentMinMaxAddresses(0, 9999999, []btcutil.Address{addr})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list unspent: %w", err)
+	}
+
+	// Calculate total balance from UTXOs
+	var totalBalance btcutil.Amount
+	for _, utxo := range unspentList {
+		amount, err := btcutil.NewAmount(utxo.Amount)
+		if err != nil {
+			continue
+		}
+		totalBalance += amount
+	}
+	// Get converted balance (in BTC)
+	btcBalance := totalBalance.ToBTC()
+
+	return map[string]any{
+		"address": userAddr,
+		"balance": btcBalance,
+	}, nil
+}
+
 // GetMasterWallet Get master wallet info (address and token balance)
+// Returns: Map of master wallet info (address and balances of all available tokens)
 func (btc *Bitcoin) GetMasterWallet() (map[string]any, error) {
 	// Get master wallet address from Vault
 	masterData, err := vault.GetClient().GetSecret("master/" + btc.NetworkCode)
@@ -190,7 +232,7 @@ func (btc *Bitcoin) GetTransactionCommission(oType, wType string, wId *uint32, c
 		return nil, fmt.Errorf("failed to convert amount: %w", err)
 	}
 
-	// Get UTXO data
+	// Get UTXO data (returns fee estimate even without UTXOs)
 	_, _, estimatedFee, err := btc.getUTXOData(fromAddress, amountSatoshi)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get UTXO data: %w", err)
@@ -719,21 +761,7 @@ func (btc *Bitcoin) deriveWallet(mnemonic string, userId uint32) (string, string
 // amountSatoshi: Amount in Satoshi
 // Returns: selectedUTXOs, totalInput, estimatedFee, error
 func (btc *Bitcoin) getUTXOData(fromAddress btcutil.Address, amountSatoshi btcutil.Amount) ([]btcjson.ListUnspentResult, btcutil.Amount, btcutil.Amount, error) {
-	// Get UTXOs for from address (min 1 confirmation for security)
-	unspentList, err := btc.Client.ListUnspentMinMaxAddresses(1, 9999999, []btcutil.Address{fromAddress})
-	if err != nil {
-		return nil, 0, 0, fmt.Errorf("failed to get UTXO list: %w", err)
-	}
-	if len(unspentList) == 0 {
-		return nil, 0, 0, fmt.Errorf("no UTXOs available for address '%s'", fromAddress.String())
-	}
-
-	// Sort UTXOs by amount descending (larger first = fewer inputs = lower fee)
-	sort.Slice(unspentList, func(i, j int) bool {
-		return unspentList[i].Amount > unspentList[j].Amount
-	})
-
-	// Get fee rate (sat/vB)
+	// Get fee rate (satoshi/vBytes)
 	feeResult, err := btc.Client.EstimateSmartFee(6, &btcjson.EstimateModeConservative)
 	if err != nil {
 		return nil, 0, 0, fmt.Errorf("failed to estimate fee: %w", err)
@@ -742,6 +770,24 @@ func (btc *Bitcoin) getUTXOData(fromAddress btcutil.Address, amountSatoshi btcut
 		return nil, 0, 0, fmt.Errorf("invalid fee rate returned")
 	}
 	feeRateBTCPerKB := *feeResult.FeeRate
+
+	// Get UTXOs for from address (min 1 confirmation for security)
+	unspentList, err := btc.Client.ListUnspentMinMaxAddresses(1, 9999999, []btcutil.Address{fromAddress})
+	if err != nil {
+		return nil, 0, 0, fmt.Errorf("failed to get UTXO list: %w", err)
+	}
+	// Fallback - if no UTXOs, estimate fee for typical transaction
+	if len(unspentList) == 0 {
+		// Typical P2WPKH tx: 1 input + 2 outputs ≈ 140 vBytes
+		txVSize := 140
+		estimatedFee, _ := btcutil.NewAmount(float64(txVSize) / 1000 * feeRateBTCPerKB)
+		return nil, 0, estimatedFee, nil // Return only fee estimate
+	}
+
+	// Sort UTXOs by amount descending (larger first = fewer inputs = lower fee)
+	sort.Slice(unspentList, func(i, j int) bool {
+		return unspentList[i].Amount > unspentList[j].Amount
+	})
 
 	// Assume 2 outputs: recipient + change (both P2WPKH for estimation)
 	numOutputs := 2

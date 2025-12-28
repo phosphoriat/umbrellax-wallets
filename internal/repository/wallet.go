@@ -49,11 +49,12 @@ func (r *WalletRepository) GetAddressListByNetwork(network string) (map[string]u
 	return addressList, nil
 }
 
-// GetAddressByUserId Get address by user id
-func (r *WalletRepository) GetAddressByUserId(userId uint) (string, error) {
+// GetAddressByUserId Get address by user id and network
+func (r *WalletRepository) GetAddressByUserId(userId uint, network string) (string, error) {
 	var wallet models.Wallet
 
 	err := r.db.Where("user_id = ?", userId).
+		Where("network = ?", network).
 		First(&wallet).Error
 	if err != nil {
 		return "", err
@@ -75,9 +76,11 @@ func (r *WalletRepository) GetUserIdByAddress(address string) (uint, error) {
 	return wallet.UserId, nil
 }
 
-// Create new wallet
-func (r *WalletRepository) Create(wallet *models.Wallet) (*models.Wallet, error) {
-	err := r.db.Create(wallet).Error
+// FirstOrCreate Create new wallet, if not exists
+func (r *WalletRepository) FirstOrCreate(wallet *models.Wallet) (*models.Wallet, error) {
+	err := r.db.Where("user_id = ?", wallet.UserId).
+		Where("network = ?", wallet.Network).
+		FirstOrCreate(wallet).Error
 	if err != nil {
 		return nil, err
 	}

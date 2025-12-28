@@ -26,6 +26,15 @@ type HTTPClient struct {
 var (
 	clientInstance *HTTPClient
 	once           sync.Once
+	// Network code mapping to Bybit format
+	networkToBybit = map[string]string{
+		"tron":     "TRX",
+		"ethereum": "ETH",
+		"bsc":      "BSC",
+		"ton":      "TON",
+		"bitcoin":  "BTC",
+		"solana":   "SOL",
+	}
 )
 
 // GetClient Get global Bybit HTTPClient instance
@@ -53,6 +62,12 @@ func newHTTPClient() *HTTPClient {
 // network: Network code
 // @docs https://bybit-exchange.github.io/docs/v5/asset/coin-info
 func (c *HTTPClient) GetCoinInfo(ctx context.Context, coin, network string) (map[string]any, error) {
+	// Convert network to Bybit format
+	bybitNetwork, ok := networkToBybit[network]
+	if !ok {
+		return nil, fmt.Errorf("[Bybit API] GetCoinInfo: Network %s not supported", network)
+	}
+
 	resultMap, err := c.sendRequest(ctx, map[string]any{"coin": coin}, "GetCoinInfo")
 	if err != nil {
 		return nil, err
@@ -80,12 +95,12 @@ func (c *HTTPClient) GetCoinInfo(ctx context.Context, coin, network string) (map
 	}
 
 	for _, chainItem := range chainsList {
-		if chainName, _ := utils.DataGet(chainItem, "chain"); chainName == network {
+		if chainName, _ := utils.DataGet(chainItem, "chain"); chainName == bybitNetwork {
 			result["network"] = chainItem
 			return result, nil
 		}
 	}
-	return nil, fmt.Errorf("[Bybit API] GetCoinInfo: Network '%s' not found for coin '%s'", network, coin)
+	return nil, fmt.Errorf("[Bybit API] GetCoinInfo: Network '%s' not found for coin '%s'", bybitNetwork, coin)
 }
 
 // GetDepositAddress Get deposit wallet address
@@ -94,9 +109,15 @@ func (c *HTTPClient) GetCoinInfo(ctx context.Context, coin, network string) (map
 // network: Network code
 // @docs https://bybit-exchange.github.io/docs/v5/asset/deposit/master-deposit-addr
 func (c *HTTPClient) GetDepositAddress(ctx context.Context, coin, network string) (string, error) {
+	// Convert network to Bybit format
+	bybitNetwork, ok := networkToBybit[network]
+	if !ok {
+		return "", fmt.Errorf("[Bybit API] GetDepositAddress: Network %s not supported", network)
+	}
+
 	resultMap, err := c.sendRequest(ctx, map[string]any{
 		"coin":      coin,
-		"chainType": strings.ToUpper(network),
+		"chainType": bybitNetwork,
 	}, "GetMasterAccDepositAddress")
 	if err != nil {
 		return "", err
@@ -105,7 +126,7 @@ func (c *HTTPClient) GetDepositAddress(ctx context.Context, coin, network string
 	if chains, ok := utils.DataGet(resultMap, "chains"); ok {
 		for _, chainItem := range chains.([]any) {
 			if chainType, _ := utils.DataGet(chainItem, "chainType"); chainType != nil {
-				if chainTypeStr, ok := chainType.(string); ok && strings.EqualFold(chainTypeStr, network) {
+				if chainTypeStr, ok := chainType.(string); ok && strings.EqualFold(chainTypeStr, bybitNetwork) {
 					if address, ok := utils.DataGet(chainItem, "addressDeposit"); ok {
 						if addressStr, ok := address.(string); ok {
 							return addressStr, nil
@@ -116,7 +137,7 @@ func (c *HTTPClient) GetDepositAddress(ctx context.Context, coin, network string
 		}
 	}
 	return "", fmt.Errorf("[Bybit API] GetDepositAddress: Deposit address for coin '%s' on network '%s' not found",
-		coin, network)
+		coin, bybitNetwork)
 }
 
 // GetWalletBalance Get wallet balance
@@ -193,6 +214,12 @@ func (c *HTTPClient) GetWithdrawalRecords(ctx context.Context, params map[string
 // amount: Withdraw amount value
 // @docs https://bybit-exchange.github.io/docs/v5/asset/withdraw
 func (c *HTTPClient) CreateWithdraw(ctx context.Context, coin, chain string, amount float64) (string, error) {
+	// Convert network to Bybit format
+	bybitChain, ok := networkToBybit[chain]
+	if !ok {
+		return "", fmt.Errorf("[Bybit API] CreateWithdraw: Network %s not supported", chain)
+	}
+
 	// Get master wallet address for network from Vault
 	masterAddress, err := vault.GetClient().GetSecret("/master/" + chain)
 	if err != nil {
@@ -219,7 +246,7 @@ func (c *HTTPClient) CreateWithdraw(ctx context.Context, coin, chain string, amo
 	// Send withdraw request from FUND account to master wallet
 	resultMap, err := c.sendRequest(ctx, map[string]any{
 		"coin":        coin,
-		"chain":       chain,
+		"chain":       bybitChain,
 		"address":     masterAddress,
 		"amount":      strconv.FormatFloat(amount, 'f', 8, 64),
 		"timestamp":   time.Now().UnixMilli(),

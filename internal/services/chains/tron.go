@@ -108,10 +108,10 @@ func (tron *Tron) GetCode() string {
 	return tron.NetworkCode
 }
 
-// GetUserWallet Get user HD-wallet by user id
+// GetUserWalletAddress Get user HD-wallet by user id
 // userId: Unique user id
 // Returns: User HD-wallet address
-func (tron *Tron) GetUserWallet(userId uint32) (string, error) {
+func (tron *Tron) GetUserWalletAddress(userId uint32) (string, error) {
 	// Get master wallet data from Vault
 	masterData, err := vault.GetClient().GetSecret("master/" + tron.NetworkCode)
 	if err != nil {
@@ -131,6 +131,40 @@ func (tron *Tron) GetUserWallet(userId uint32) (string, error) {
 	return addr, nil
 }
 
+// GetUserWallet Get user wallet info (address and token balances)
+// userId: Unique user id
+// Returns: Map of user wallet info (address and balances of all available tokens)
+func (tron *Tron) GetUserWallet(userId uint32) (map[string]any, error) {
+	// Get user wallet address
+	userAddr, _, err := tron.getWallet("user", &userId)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user wallet address: %w", err)
+	}
+
+	// Get TRC20 token balances
+	balances := make(map[string]any)
+	for token, contractAddr := range config.ContractsAddresses[tron.NetworkCode] {
+		tokenBalance, err := tron.getTrc20Balance(contractAddr, userAddr)
+		if err != nil {
+			continue
+		}
+
+		balances[token] = tokenBalance
+	}
+
+	// Get TRX native balance
+	trxBalance, err := tron.getNativeBalance(userAddr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get native balance for user %d: %w", userId, err)
+	}
+	balances[tron.NativeToken] = trxBalance
+
+	return map[string]any{
+		"address":  userAddr,
+		"balances": balances,
+	}, nil
+}
+
 // GetMasterWallet Get master wallet info (address and token balances)
 // Returns: Map of master wallet info (address and balances of all available tokens)
 func (tron *Tron) GetMasterWallet() (map[string]any, error) {
@@ -139,17 +173,27 @@ func (tron *Tron) GetMasterWallet() (map[string]any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get master data: %w", err)
 	}
-	masterAddr := masterData["address"].(string)
+	masterAddr, ok := masterData["address"].(string)
+	if !ok || masterAddr == "" {
+		return nil, fmt.Errorf("master address not found in Vault")
+	}
 
 	// Get TRC20 token balances
 	balances := make(map[string]any)
 	for token, contractAddr := range config.ContractsAddresses[tron.NetworkCode] {
-		tokenBalance, _ := tron.getTrc20Balance(contractAddr, masterAddr)
+		tokenBalance, err := tron.getTrc20Balance(contractAddr, masterAddr)
+		if err != nil {
+			continue
+		}
+
 		balances[token] = tokenBalance
 	}
 
 	// Get TRX native balance
-	trxBalance, _ := tron.getNativeBalance(masterAddr)
+	trxBalance, err := tron.getNativeBalance(masterAddr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get native balance: %w", err)
+	}
 	balances[tron.NativeToken] = trxBalance
 
 	return map[string]any{
@@ -623,6 +667,10 @@ func (tron *Tron) getNativeBalance(addr string) (float64, error) {
 	// Get account instance by wallet address
 	account, err := tron.Client.GetAccount(tronAddr.String())
 	if err != nil {
+		// Account not found — not activated, balance is 0
+		if strings.Contains(err.Error(), "account not found") {
+			return 0, nil
+		}
 		return 0, err
 	}
 	// Get raw balance (in SUN)
@@ -761,11 +809,12 @@ func (tron *Tron) calcTrc20Fee(currency, fromAddr, toAddr string, amount float64
 	energyEstimate, err := tron.Client.EstimateEnergy(
 		fromAddr, contractAddr,
 		"transfer(address,uint256)",
-		fmt.Sprintf(`[{"type":"address","value":"%s"},{"type":"uint256","value":"%s"}]`, toAddr, amountSun.String()),
+		fmt.Sprintf(`[{"address":"%s"},{"uint256":"%s"}]`, toAddr, amountSun.String()),
 		0, "", 0,
 	)
-	// If err returned, get needed energy value from config
 	if err != nil {
+		// Fallback to config
+		log.Printf("[Tron] EstimateEnergy failed (using fallback): %v", err)
 		energyNeeded = config.TokenSettings[tron.NetworkCode][currency].EstimatedEnergy
 	} else {
 		energyNeeded = int(energyEstimate.EnergyRequired)
@@ -779,13 +828,8 @@ func (tron *Tron) calcTrc20Fee(currency, fromAddr, toAddr string, amount float64
 		energyNeeded = energyNeeded * 2
 	}
 
-	// Create tx of smart contract call
-	tx, err := tron.Client.TriggerContract(
-		fromAddr, contractAddr,
-		"transfer(address,uint256)",
-		fmt.Sprintf(`[{"type":"address","value":"%s"},{"type":"uint256","value":"%s"}]`, toAddr, amountSun.String()),
-		0, 0, "", 0,
-	)
+	// Create TRC20 tx entity
+	tx, err := tron.Client.TRC20Send(fromAddr, toAddr, contractAddr, amountSun, 0)
 	if err != nil {
 		return 0, fmt.Errorf("failed to trigger contract: %w", err)
 	}

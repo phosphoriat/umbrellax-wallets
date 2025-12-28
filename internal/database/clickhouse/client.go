@@ -2,6 +2,8 @@ package clickhouse
 
 import (
 	"fmt"
+	"log"
+	"os"
 	"sync"
 	"time"
 
@@ -9,6 +11,7 @@ import (
 
 	"gorm.io/driver/clickhouse"
 	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 // Client ClickHouse connection struct
@@ -55,7 +58,17 @@ func newClickHouseClient(cfg *config.Config) (*Client, error) {
 		cfg.ClickHouseHost, cfg.ClickHousePort, cfg.ClickHouseName, cfg.ClickHouseUser, cfg.ClickHousePassword)
 
 	// Open ClickHouse connection
-	db, err := gorm.Open(clickhouse.Open(dsn), &gorm.Config{})
+	db, err := gorm.Open(clickhouse.Open(dsn), &gorm.Config{
+		Logger: logger.New(
+			log.New(os.Stdout, "\r\n", log.LstdFlags),
+			logger.Config{
+				SlowThreshold:             time.Second,
+				LogLevel:                  logger.Warn,
+				IgnoreRecordNotFoundError: true,
+				Colorful:                  false,
+			},
+		),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to ClickHouse: %w", err)
 	}

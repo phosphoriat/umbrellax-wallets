@@ -54,12 +54,12 @@ func (h *TransactionsHandler) GetTransactionCommission(c *fiber.Ctx) error {
 	}
 
 	if err := middleware.ValidateStruct(params); err != nil {
-		return c.JSON(err)
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
 	}
 
-	res, err := h.service.GetTransactionCommission(params.Currency, params.Network, params.To, params.Amount, params.Memo)
+	res, err := h.service.GetTransactionCommission(params.Network, params.Currency, params.To, params.Amount, params.Memo)
 	if err != nil {
-		return c.JSON(err)
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(res)
 }
@@ -74,12 +74,12 @@ func (h *TransactionsHandler) GetTransactionStatus(c *fiber.Ctx) error {
 	}
 
 	if err := middleware.ValidateStruct(params); err != nil {
-		return c.JSON(err)
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
 	}
 
 	res, err := h.service.GetTransactionStatus(params.Network, params.Hash, params.To)
 	if err != nil {
-		return c.JSON(err)
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"status": res})
 }
@@ -96,12 +96,12 @@ func (h *TransactionsHandler) SendWithdrawal(c *fiber.Ctx) error {
 	}
 
 	if err := middleware.ValidateStruct(params); err != nil {
-		return c.JSON(err)
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
 	}
 
-	res, err := h.service.SendWithdrawal(params.Currency, params.Network, params.To, params.Amount, params.Memo)
+	res, err := h.service.SendWithdrawal(params.Network, params.Currency, params.To, params.Amount, params.Memo)
 	if err != nil {
-		return c.JSON(err)
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
 	return c.JSON(fiber.Map{"transaction": res})
 }
