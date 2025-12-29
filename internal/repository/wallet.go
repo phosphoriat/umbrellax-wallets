@@ -18,11 +18,18 @@ func NewWalletRepository() *WalletRepository {
 	}
 }
 
-// GetList Get list of all wallets
-func (r *WalletRepository) GetList() ([]models.Wallet, error) {
+// GetRefilled Get refilled wallets
+// Returns: Wallet models list
+func (r *WalletRepository) GetRefilled(userId uint) ([]models.Wallet, error) {
 	var wallets []models.Wallet
 
-	err := r.db.Order("created_at DESC").Find(&wallets).Error
+	query := r.db.Model(&models.Wallet{})
+	if userId > 0 {
+		query = query.Where("user_id = ?", userId)
+	}
+
+	err := query.Where("is_refilled = ?", true).
+		Find(&wallets).Error
 	if err != nil {
 		return nil, err
 	}
@@ -31,6 +38,8 @@ func (r *WalletRepository) GetList() ([]models.Wallet, error) {
 }
 
 // GetAddressListByNetwork Get address list by network
+// network: Network code
+// Returns: map[address]userId
 func (r *WalletRepository) GetAddressListByNetwork(network string) (map[string]uint, error) {
 	var wallets []models.Wallet
 
@@ -50,6 +59,9 @@ func (r *WalletRepository) GetAddressListByNetwork(network string) (map[string]u
 }
 
 // GetAddressByUserId Get address by user id and network
+// userId: User id
+// network: Network code
+// Returns: Wallet address
 func (r *WalletRepository) GetAddressByUserId(userId uint, network string) (string, error) {
 	var wallet models.Wallet
 
@@ -64,6 +76,8 @@ func (r *WalletRepository) GetAddressByUserId(userId uint, network string) (stri
 }
 
 // GetUserIdByAddress Get user id by address
+// address: User wallet address
+// Returns: User id
 func (r *WalletRepository) GetUserIdByAddress(address string) (uint, error) {
 	var wallet models.Wallet
 
@@ -76,14 +90,28 @@ func (r *WalletRepository) GetUserIdByAddress(address string) (uint, error) {
 	return wallet.UserId, nil
 }
 
-// FirstOrCreate Create new wallet, if not exists
-func (r *WalletRepository) FirstOrCreate(wallet *models.Wallet) (*models.Wallet, error) {
-	err := r.db.Where("user_id = ?", wallet.UserId).
-		Where("network = ?", wallet.Network).
-		FirstOrCreate(wallet).Error
+// Create new wallet (ReplacingMergeTree handles duplicates)
+// Returns: Created Wallet model
+func (r *WalletRepository) Create(wallet *models.Wallet) (*models.Wallet, error) {
+	err := r.db.Create(wallet).Error
 	if err != nil {
 		return nil, err
 	}
 
 	return wallet, nil
+}
+
+// SetRefilled Update is_refilled flag via insert (ReplacingMergeTree handles merge)
+func (r *WalletRepository) SetRefilled(userId uint, network string, isRefilled bool) error {
+	var wallet models.Wallet
+
+	err := r.db.Where("user_id = ? AND network = ?", userId, network).
+		First(&wallet).Error
+	if err != nil {
+		return err
+	}
+
+	wallet.IsRefilled = isRefilled
+
+	return r.db.Create(&wallet).Error
 }

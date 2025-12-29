@@ -130,7 +130,7 @@ func (bsc *Bsc) GetUserWallet(userId uint32) (map[string]any, error) {
 	}
 
 	// Get BEP20 token balances
-	balances := make(map[string]any)
+	balances := make(map[string]float64)
 	for token, contractAddr := range config.ContractsAddresses[bsc.NetworkCode] {
 		tokenBalance, err := bsc.getBep20Balance(contractAddr, userAddr)
 		if err != nil {
@@ -151,6 +151,35 @@ func (bsc *Bsc) GetUserWallet(userId uint32) (map[string]any, error) {
 		"address":  userAddr,
 		"balances": balances,
 	}, nil
+}
+
+// GetUserWalletBalance Get token balance amount for user wallet
+// userId: User id
+// currency: Token ticker
+// Returns Balance amount for token
+func (bsc *Bsc) GetUserWalletBalance(userId uint32, currency string) (float64, error) {
+	// Get user wallet address
+	userAddr, _, err := bsc.getWallet("user", &userId)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get user wallet address: %w", err)
+	}
+
+	var balance float64
+	if currency == "BNB" {
+		balance, err = bsc.getNativeBalance(userAddr)
+	} else {
+		contractAddr, ok := config.ContractsAddresses[bsc.NetworkCode][currency]
+		if !ok {
+			return 0, fmt.Errorf("unsupported currency %q on network %s", currency, bsc.NetworkCode)
+		}
+
+		balance, err = bsc.getBep20Balance(contractAddr, userAddr)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("failed to get balance for user %d: %w", userId, err)
+	}
+
+	return balance, nil
 }
 
 // GetMasterWallet Get master wallet info (address and token balances)

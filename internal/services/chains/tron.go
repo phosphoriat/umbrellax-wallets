@@ -142,7 +142,7 @@ func (tron *Tron) GetUserWallet(userId uint32) (map[string]any, error) {
 	}
 
 	// Get TRC20 token balances
-	balances := make(map[string]any)
+	balances := make(map[string]float64)
 	for token, contractAddr := range config.ContractsAddresses[tron.NetworkCode] {
 		tokenBalance, err := tron.getTrc20Balance(contractAddr, userAddr)
 		if err != nil {
@@ -163,6 +163,35 @@ func (tron *Tron) GetUserWallet(userId uint32) (map[string]any, error) {
 		"address":  userAddr,
 		"balances": balances,
 	}, nil
+}
+
+// GetUserWalletBalance Get token balance amount for user wallet
+// userId: User id
+// currency: Token ticker
+// Returns Balance amount for token
+func (tron *Tron) GetUserWalletBalance(userId uint32, currency string) (float64, error) {
+	// Get user wallet address
+	userAddr, _, err := tron.getWallet("user", &userId)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get user wallet address: %w", err)
+	}
+
+	var balance float64
+	if currency == "TRX" {
+		balance, err = tron.getNativeBalance(userAddr)
+	} else {
+		contractAddr, ok := config.ContractsAddresses[tron.NetworkCode][currency]
+		if !ok {
+			return 0, fmt.Errorf("unsupported currency %q on network %s", currency, tron.NetworkCode)
+		}
+
+		balance, err = tron.getTrc20Balance(contractAddr, userAddr)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("failed to get balance for user %d: %w", userId, err)
+	}
+
+	return balance, nil
 }
 
 // GetMasterWallet Get master wallet info (address and token balances)
@@ -804,7 +833,7 @@ func (tron *Tron) calcTrc20Fee(currency, fromAddr, toAddr string, amount float64
 	// Convert amount to SUN with contract decimals
 	amountSun, _ := decimals.ApplyDecimals(big.NewFloat(amount), contractDecimals.Int64())
 
-	// Calc exact needed energy value
+	// Try to calc energy needed value
 	var energyNeeded int
 	energyEstimate, err := tron.Client.EstimateEnergy(
 		fromAddr, contractAddr,
@@ -812,12 +841,11 @@ func (tron *Tron) calcTrc20Fee(currency, fromAddr, toAddr string, amount float64
 		fmt.Sprintf(`[{"address":"%s"},{"uint256":"%s"}]`, toAddr, amountSun.String()),
 		0, "", 0,
 	)
-	if err != nil {
-		// Fallback to config
-		log.Printf("[Tron] EstimateEnergy failed (using fallback): %v", err)
-		energyNeeded = config.TokenSettings[tron.NetworkCode][currency].EstimatedEnergy
-	} else {
+	if err == nil && energyEstimate.EnergyRequired > 0 {
 		energyNeeded = int(energyEstimate.EnergyRequired)
+	} else {
+		// Fallback from config
+		energyNeeded = config.TokenSettings[tron.NetworkCode][currency].EstimatedEnergy
 	}
 
 	// Check, if to address account has USDT (affects cost)

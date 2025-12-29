@@ -13,10 +13,7 @@ type WalletsService struct {
 
 // NewWalletsService Create new instance of WalletsService
 func NewWalletsService(walletRepo *repository.WalletRepository, userRepo *repository.UserRepository) *WalletsService {
-	return &WalletsService{
-		walletRepo: walletRepo,
-		userRepo:   userRepo,
-	}
+	return &WalletsService{walletRepo, userRepo}
 }
 
 // GetUserWalletAddress Get user HD-wallet address by user id
@@ -40,7 +37,7 @@ func (s *WalletsService) GetUserWalletAddress(userId uint, userNumber, network s
 	}
 
 	// Save user in users DB, if not exists
-	_, err = s.userRepo.FirstOrCreate(&models.User{
+	_, err = s.userRepo.Create(&models.User{
 		UserId: userId,
 		Number: userNumber,
 	})
@@ -49,7 +46,7 @@ func (s *WalletsService) GetUserWalletAddress(userId uint, userNumber, network s
 	}
 
 	// Save address in wallets DB, if not exists
-	_, err = s.walletRepo.FirstOrCreate(&models.Wallet{
+	_, err = s.walletRepo.Create(&models.Wallet{
 		UserId:  userId,
 		Network: network,
 		Address: address,

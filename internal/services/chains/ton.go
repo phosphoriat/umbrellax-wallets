@@ -138,6 +138,15 @@ func (ton *Ton) GetUserWallet(userId uint32) (map[string]any, error) {
 	}, nil
 }
 
+// GetUserWalletBalance Get token balance amount for user wallet
+// @note In TON no user wallets, so this method returns null balance
+// userId: User id
+// currency: Token ticker
+// Returns 0
+func (ton *Ton) GetUserWalletBalance(userId uint32, currency string) (float64, error) {
+	return 0, nil
+}
+
 // GetMasterWallet Get master wallet info (address and token balances)
 // Returns: Map of master wallet info (address and balances of all available tokens)
 func (ton *Ton) GetMasterWallet() (map[string]any, error) {

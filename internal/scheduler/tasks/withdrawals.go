@@ -9,6 +9,8 @@ import (
 
 	"wallets/internal/config"
 	"wallets/internal/database/redis"
+	"wallets/internal/models"
+	"wallets/internal/repository"
 	"wallets/internal/services/api/bybit"
 	"wallets/internal/services/chains"
 	"wallets/internal/utils"
@@ -40,6 +42,8 @@ func NewWithdrawalsTask() *WithdrawalsTask {
 }
 
 func (t *WithdrawalsTask) Execute(ctx context.Context) error {
+	actionRepo := repository.NewActionRepository()
+
 	// Get all items from hash
 	values, err := t.redis.HGetAll(ctx, t.RedisBybitWithdrawalsKey)
 	if err != nil {
@@ -48,7 +52,7 @@ func (t *WithdrawalsTask) Execute(ctx context.Context) error {
 
 	// Process all items from hash
 	for key, value := range values {
-		err = t.processItem(ctx, key, value)
+		err = t.processItem(ctx, key, value, actionRepo)
 		if err != nil {
 			log.Printf("Withdrawals item processing error: %v", err)
 		}
@@ -61,13 +65,13 @@ func (t *WithdrawalsTask) Execute(ctx context.Context) error {
 }
 
 // @private processItem Process hash item
-func (t *WithdrawalsTask) processItem(ctx context.Context, requestId, itemStr string) error {
+func (t *WithdrawalsTask) processItem(ctx context.Context, requestId, itemStr string, actionRepo *repository.ActionRepository) error {
 	// Parse JSON item string
 	var item chains.WithdrawalTransaction
 	if err := json.Unmarshal([]byte(itemStr), &item); err != nil {
 		return fmt.Errorf("failed to unmarshal bybit withdrawal tx item: %w", err)
 	}
-	if item.BybitId == "" || item.Currency == "" || item.Network == "" || item.To == "" || item.Amount == 0 {
+	if item.BybitId == "" || item.Currency == "" || item.Network == "" || item.To == "" || item.Amount < 0 {
 		return fmt.Errorf("invalid bybit withdrawal tx item data: %+v", item)
 	}
 
@@ -78,7 +82,10 @@ func (t *WithdrawalsTask) processItem(ctx context.Context, requestId, itemStr st
 	}
 
 	if status, ok := utils.DataGet(resultMap, "0.status"); ok {
-		var txData map[string]any
+		var (
+			txData          map[string]any
+			txHash, wStatus string
+		)
 
 		// If status is success
 		if status == "success" {
@@ -89,24 +96,26 @@ func (t *WithdrawalsTask) processItem(ctx context.Context, requestId, itemStr st
 			}
 
 			// Send transaction from master wallet to address from withdraw request
-			hash, err := chainService.SendTransaction("master", nil, item.Currency, item.To, item.Amount, item.Memo)
+			txHash, err = chainService.SendTransaction("master", nil, item.Currency, item.To, item.Amount, item.Memo)
 			if err != nil {
 				return err
 			}
 
 			// Set transaction item with pending status
+			wStatus = "pending"
 			txData = map[string]any{
 				"bybit_id": item.BybitId,
-				"status":   "pending",
-				"hash":     hash,
+				"status":   wStatus,
+				"hash":     txHash,
 				"aml_id":   item.AmlId,
 			}
 
 		} else {
 			// Set transaction item with failed status
+			wStatus = "failed"
 			txData = map[string]any{
 				"bybit_id": item.BybitId,
-				"status":   "failed",
+				"status":   wStatus,
 			}
 		}
 
@@ -117,6 +126,23 @@ func (t *WithdrawalsTask) processItem(ctx context.Context, requestId, itemStr st
 
 		// Add transaction item in withdrawals Redis HASH
 		t.redis.HSet(ctx, t.RedisWithdrawalsKey, requestId, txItem)
+
+		// Register withdrawal action
+		_, err = actionRepo.Create(&models.Action{
+			UserId: item.UserId,
+			Type:   "withdrawal",
+			Data: map[string]any{
+				"network": item.Network,
+				"token":   item.Currency,
+				"amount":  item.Amount,
+				"hash":    txHash,
+			},
+			Status: wStatus,
+		})
+		if err != nil {
+			log.Printf("Failed to create withdrawal action in network %s for user %d: %v",
+				item.Network, item.UserId, err)
+		}
 
 		return nil
 	}

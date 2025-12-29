@@ -29,6 +29,7 @@ type (
 	}
 	// SendTransactionQuery validation rules
 	SendTransactionQuery struct {
+		UserId   uint    `validate:"required,gte=0"`
 		Network  string  `validate:"required,network"`
 		Currency string  `validate:"required,currency"`
 		To       string  `validate:"required,address"`
@@ -52,7 +53,6 @@ func (h *TransactionsHandler) GetTransactionCommission(c *fiber.Ctx) error {
 		Amount:   c.QueryFloat("amount"),
 		Memo:     c.Query("memo", ""),
 	}
-
 	if err := middleware.ValidateStruct(params); err != nil {
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -72,7 +72,6 @@ func (h *TransactionsHandler) GetTransactionStatus(c *fiber.Ctx) error {
 		Hash:    c.Query("hash"),
 		To:      c.Query("to", ""),
 	}
-
 	if err := middleware.ValidateStruct(params); err != nil {
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -85,16 +84,16 @@ func (h *TransactionsHandler) GetTransactionStatus(c *fiber.Ctx) error {
 }
 
 // SendWithdrawal
-// POST /api/transactions/withdrawal?network={network}&currency={currency}&to={to}&amount={amount}&memo={memo}
+// POST /api/transactions/withdrawal?user_id={userId}network={network}&currency={currency}&to={to}&amount={amount}&memo={memo}
 func (h *TransactionsHandler) SendWithdrawal(c *fiber.Ctx) error {
 	params := &SendTransactionQuery{
+		UserId:   uint(c.QueryInt("user_id")),
 		Network:  c.Query("network"),
 		Currency: c.Query("currency"),
 		To:       c.Query("to"),
 		Amount:   c.QueryFloat("amount"),
 		Memo:     c.Query("memo", ""),
 	}
-
 	if err := middleware.ValidateStruct(params); err != nil {
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
 	}

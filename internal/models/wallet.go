@@ -3,8 +3,13 @@ package models
 import "time"
 
 type Wallet struct {
-	CreatedAt time.Time `json:"created_at"`
-	UserId    uint      `json:"user_id"`
-	Network   string    `json:"network"`
-	Address   string    `json:"address"`
+	CreatedAt  time.Time `json:"created_at"`
+	UserId     uint      `json:"user_id" gorm:"primaryKey"`
+	Network    string    `json:"network" gorm:"primaryKey"`
+	Address    string    `json:"address"`
+	IsRefilled bool      `json:"is_refilled"`
+}
+
+func (Wallet) TableName() string {
+	return "wallets"
 }

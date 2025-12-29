@@ -28,19 +28,16 @@ var ContractsAddresses = map[string]map[string]string{
 	},
 	"ethereum": {
 		"USDT": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
-		"USDC": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
 	},
 	"bsc": {
-		"USDT":     "0x55d398326f99059fF775485246999027B3197955",
-		"UMBRELLA": "0xf8ccF9F12f47DB271B1171be2E38B574f4050924",
-		"USDC":     "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d",
+		"USDT": "0x55d398326f99059fF775485246999027B3197955",
 	},
 	"ton": {
-		"USDT": "EQCxE6mUtQJKFnGfaROTKOt1lZbDiiX1kCixRv7Nw2Id_sDs",
+		"USDT":     "EQCxE6mUtQJKFnGfaROTKOt1lZbDiiX1kCixRv7Nw2Id_sDs",
+		"UMBRELLA": "EQBpml9LfJoC2qGZXCGDCSA0BCNvTsoONJV-bGhW1nHkWWTR",
 	},
 	"solana": {
 		"USDT": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
-		"USDC": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
 	},
 }
 

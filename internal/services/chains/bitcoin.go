@@ -128,16 +128,38 @@ func (btc *Bitcoin) GetUserWallet(userId uint32) (map[string]any, error) {
 		return nil, fmt.Errorf("failed to get user wallet address: %w", err)
 	}
 
+	// Get user wallet balance (in BTC)
+	btcBalance, err := btc.GetUserWalletBalance(userId, "BTC")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user balance: %w", err)
+	}
+
+	return map[string]any{
+		"address": userAddr,
+		"balance": map[string]float64{btc.NativeToken: btcBalance},
+	}, nil
+}
+
+// GetUserWalletBalance Get token balance amount for user wallet
+// userId: User id
+// currency: Token ticker
+// Returns: Balance amount for token
+func (btc *Bitcoin) GetUserWalletBalance(userId uint32, currency string) (float64, error) {
+	// Get user wallet address
+	userAddr, _, err := btc.getWallet("user", &userId)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get user wallet address: %w", err)
+	}
 	// Parse and validate user address
 	addr, err := btcutil.DecodeAddress(userAddr, btc.ChainParams)
 	if err != nil {
-		return nil, fmt.Errorf("invalid user address: %w", err)
+		return 0, fmt.Errorf("invalid user address: %w", err)
 	}
 
 	// Get UXTO for the user address
 	unspentList, err := btc.Client.ListUnspentMinMaxAddresses(0, 9999999, []btcutil.Address{addr})
 	if err != nil {
-		return nil, fmt.Errorf("failed to list unspent: %w", err)
+		return 0, fmt.Errorf("failed to list unspent: %w", err)
 	}
 
 	// Calculate total balance from UTXOs
@@ -152,10 +174,7 @@ func (btc *Bitcoin) GetUserWallet(userId uint32) (map[string]any, error) {
 	// Get converted balance (in BTC)
 	btcBalance := totalBalance.ToBTC()
 
-	return map[string]any{
-		"address": userAddr,
-		"balance": btcBalance,
-	}, nil
+	return btcBalance, nil
 }
 
 // GetMasterWallet Get master wallet info (address and token balance)

@@ -12,11 +12,19 @@ func SetupRoutes(app *fiber.App) {
 	// Init repositories
 	walletRepo := repository.NewWalletRepository()
 	userRepo := repository.NewUserRepository()
+	actionRepo := repository.NewActionRepository()
 
-	// Init routes handlers
-	tokensHandler := handlers.NewTokensHandler(services.NewTokensService())
-	walletsHandler := handlers.NewWalletsHandler(services.NewWalletsService(walletRepo, userRepo))
-	transactionsHandler := handlers.NewTransactionsHandler(services.NewTransactionsService())
+	// Init services
+	tokensService := services.NewTokensService()
+	walletsService := services.NewWalletsService(walletRepo, userRepo)
+	transactionsService := services.NewTransactionsService()
+	actionsService := services.NewActionsService(actionRepo, walletRepo)
+
+	// Init handlers
+	tokensHandler := handlers.NewTokensHandler(tokensService)
+	walletsHandler := handlers.NewWalletsHandler(walletsService)
+	transactionsHandler := handlers.NewTransactionsHandler(transactionsService)
+	actionsHandler := handlers.NewActionsHandler(actionsService)
 
 	// Set api routes group
 	api := app.Group("/api")
@@ -41,4 +49,9 @@ func SetupRoutes(app *fiber.App) {
 	transactions.Get("/commission", transactionsHandler.GetTransactionCommission)
 	transactions.Get("/status", transactionsHandler.GetTransactionStatus)
 	transactions.Post("/withdrawal", transactionsHandler.SendWithdrawal)
+
+	// Actions routes group
+	actions := api.Group("/actions")
+	actions.Get("/", actionsHandler.GetActions)
+	actions.Post("/auto-transfer", actionsHandler.RunAutoTransfers)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"wallets/internal/repository"
 	"wallets/internal/services/chains"
 )
 
@@ -23,5 +24,9 @@ func NewRefillsTask() *RefillsTask {
 }
 
 func (t *RefillsTask) Execute(ctx context.Context) error {
-	return chains.ProcessInboundTransactions(ctx)
+	// Init repositories
+	walletRepo := repository.NewWalletRepository()
+	actionRepo := repository.NewActionRepository()
+
+	return chains.ProcessInboundTransactions(ctx, walletRepo, actionRepo)
 }

@@ -11,8 +11,10 @@ import (
 
 	"wallets/internal/config"
 	"wallets/internal/database/redis"
+	"wallets/internal/models"
 	"wallets/internal/repository"
 	"wallets/internal/services/api/aml"
+	"wallets/internal/services/api/notifications"
 	"wallets/internal/services/api/rates"
 
 	"github.com/avast/retry-go/v5"
@@ -33,6 +35,7 @@ type (
 	// WithdrawalTransaction Withdrawal transaction struct
 	WithdrawalTransaction struct {
 		BybitId  string  `json:"bybit_id,omitempty"`
+		UserId   uint    `json:"user_id,omitempty"`
 		Status   string  `json:"status,omitempty"`
 		Currency string  `json:"currency"`
 		Network  string  `json:"network"`
@@ -46,6 +49,7 @@ type (
 	BaseChainService struct {
 		WalletRepo  *repository.WalletRepository
 		UserRepo    *repository.UserRepository
+		ActionRepo  *repository.ActionRepository
 		NetworkCode string
 		NativeToken string
 	}
@@ -55,6 +59,7 @@ type (
 		GetCode() string
 		GetUserWalletAddress(userId uint32) (string, error)
 		GetUserWallet(userId uint32) (map[string]any, error)
+		GetUserWalletBalance(userId uint32, currency string) (float64, error)
 		GetMasterWallet() (map[string]any, error)
 		GetTransactionCommission(oType, wType string, wId *uint32, currency, to string, amount float64, memo string) (map[string]float64, error)
 		GetTransactionStatus(hash, toAddr string) (string, error)
@@ -65,7 +70,9 @@ type (
 
 // ProcessInboundTransactions Process inbound transactions (scheduled every 10 sec)
 // ctx: Process context from scheduler
-func ProcessInboundTransactions(ctx context.Context) error {
+func ProcessInboundTransactions(
+	ctx context.Context, walletRepo *repository.WalletRepository, actionRepo *repository.ActionRepository,
+) error {
 	// Load config
 	cfg, _ := config.Load()
 
@@ -113,22 +120,21 @@ func ProcessInboundTransactions(ctx context.Context) error {
 				var amlId string
 
 				// Get tx currency rate from cache
-				if rate, ok := rates.GetClient().GetRate("crypto", tx.Currency, "USD"); ok {
-					// Get tx amount in USD
-					amountUsd := tx.Amount * rate
+				rate, _ := rates.GetClient().GetRate("crypto", tx.Currency, "USD")
+				// Get tx amount in USD
+				amountUsd := tx.Amount * rate
 
-					// Refill transaction AML check, if tx amount in USD equals or higher aml threshold amount
-					if amountUsd >= cfg.AmlThreshold {
-						amlId, err = aml.GetClient().CheckTransaction(ctx, network, tx.Currency, tx.TxId, tx.To, "incoming")
-						if err != nil {
-							log.Printf("[ProcessInboundTransactions] [%s] AML check incoming tx '%s' failed: %v",
-								network, tx.TxId, err)
-							// Continue processing, even if AML check failed
-						}
+				// Refill transaction's AML check, if tx amount in USD equals or higher aml threshold amount
+				if amountUsd >= cfg.AmlThreshold {
+					amlId, err = aml.GetClient().CheckTransaction(ctx, network, tx.Currency, tx.TxId, tx.To, "incoming")
+					if err != nil {
+						log.Printf("[ProcessInboundTransactions] [%s] AML check incoming tx '%s' failed: %v",
+							network, tx.TxId, err)
+						// Continue processing, even if AML check failed
 					}
 				}
 
-				// Transfer tokens from user wallet to master wallet and return transfer fee (in native network token)
+				// Try to transfer tokens from user to master wallet and get transfer fee (in native network token)
 				transferFeeAmount, err := TransferTokensToMasterWallet(
 					ctx, chainService, uint32(tx.UserId), tx.Currency, tx.To, tx.Amount,
 				)
@@ -138,7 +144,7 @@ func ProcessInboundTransactions(ctx context.Context) error {
 					// Continue processing, even if transfer tokens failed
 				}
 
-				// Get refill tx item encoded in JSON
+				// Encode refill tx item in JSON
 				txItem, err := json.Marshal(map[string]any{
 					"user_id":  tx.UserId,
 					"currency": tx.Currency,
@@ -151,7 +157,7 @@ func ProcessInboundTransactions(ctx context.Context) error {
 					"aml_id":   amlId,
 				})
 				if err != nil {
-					log.Printf("[ProcessInboundTransactions] [%s] Failed to marshal tx item for tx %s: %v",
+					log.Printf("[ProcessInboundTransactions] [%s] Failed to marshal item for tx %s: %v",
 						network, tx.TxId, err)
 					continue
 				}
@@ -164,6 +170,31 @@ func ProcessInboundTransactions(ctx context.Context) error {
 				} else {
 					log.Printf("[ProcessInboundTransactions] [%s] Tx '%s' successfully processed",
 						network, tx.TxId)
+				}
+
+				// Set refilled flag to true for user wallet in network
+				err = walletRepo.SetRefilled(tx.UserId, network, true)
+				if err != nil {
+					log.Printf("[ProcessInboundTransactions] [%s] Failed to set wallet refilled for user %d: %v",
+						network, tx.UserId, err)
+				}
+				// Register refill action
+				_, err = actionRepo.Create(&models.Action{
+					UserId: tx.UserId,
+					Type:   "refill",
+					Data: map[string]any{
+						"network": network,
+						"token":   tx.Currency,
+						"amount":  tx.Amount,
+						"hash":    tx.TxId,
+						"fee":     transferFeeAmount,
+						"aml_id":  amlId,
+					},
+					Status: "success",
+				})
+				if err != nil {
+					log.Printf("[ProcessInboundTransactions] [%s] Failed to create refill action for user %d: %v",
+						network, tx.UserId, err)
 				}
 			}
 		}()
@@ -181,16 +212,19 @@ func ProcessInboundTransactions(ctx context.Context) error {
 // TransferTokensToMasterWallet Transfer tokens from user→master wallet (with retrying)
 // @note In current version at Bybit wallet
 // ctx: Current process context
+// bot: Telebot instance for sending Telegram notifications
 // chainService: Network service instance
 // userId: User id
 // currency: Token ticker
 // userAddr: User wallet address
 // amount: Amount in float value
 // Returns: Transfer fee amount (in native network token value)
-func TransferTokensToMasterWallet(ctx context.Context, chainService ChainService, userId uint32, currency, userAddr string, amount float64) (float64, error) {
+func TransferTokensToMasterWallet(
+	ctx context.Context, chainService ChainService, userId uint32, currency, userAddr string, amount float64,
+) (float64, error) {
 	// Get network data from config
 	network := chainService.GetCode()
-	cfg, ok := config.GetNetworkConfig(network)
+	networkCfg, ok := config.GetNetworkConfig(network)
 	if !ok {
 		return 0, fmt.Errorf("[TransferTokensToMasterWallet] Unknown network: %s", network)
 	}
@@ -214,15 +248,15 @@ func TransferTokensToMasterWallet(ctx context.Context, chainService ChainService
 	// Calc needed fee amount (in native network token) for sending tokens from user to Bybit wallet
 	retryErr = retrier.Do(
 		func() error {
-			// Calc fee amount for user→bybit transfer
-			userFee, err := chainService.GetTransactionCommission("inner", "user", &userId, currency, cfg.BybitAddress, amount, "")
+			// Calc fee amount for user→Bybit transfer
+			userFee, err := chainService.GetTransactionCommission("inner", "user", &userId, currency, networkCfg.BybitAddress, amount, "")
 			if err != nil {
 				return fmt.Errorf("failed to get transaction commission: %w", err)
 			}
 			// Add fee buffer
-			transferFeeAmount = userFee["chain_fee"] + userFee["chain_fee"]*cfg.FeeBuffer
+			transferFeeAmount = userFee["chain_fee"] + userFee["chain_fee"]*networkCfg.FeeBuffer
 
-			// Calc fee amount for master→user wallet native token transfer
+			// Calc fee amount for master→user native token transfer
 			masterFee, err := chainService.GetTransactionCommission("inner", "master", &userId, currency, userAddr, amount, "")
 			if err != nil {
 				return fmt.Errorf("failed to get transaction commission: %w", err)
@@ -237,16 +271,33 @@ func TransferTokensToMasterWallet(ctx context.Context, chainService ChainService
 	}
 
 	// Send native token for fee payment from master to user wallet, if currency != native token
-	if currency != cfg.NativeToken {
+	if currency != networkCfg.NativeToken {
+		// Check needed amount of native token in master wallet
+		balance, err := chainService.GetUserWalletBalance(userId, currency)
+		if err != nil {
+			return 0, fmt.Errorf("[TransferTokensToMasterWallet] Failed to get user %s balance: %w", currency, err)
+		}
+		if balance < transferFeeAmount {
+			errMsg := fmt.Errorf("[TransferTokensToMasterWallet] Not enough master wallet %s balance", networkCfg.NativeToken)
+
+			// Send notifications to channels
+			err := notifications.GetClient().SendNotifications(ctx, errMsg.Error())
+			if err != nil {
+				log.Printf("[TransferTokensToMasterWallet] Failed to send notifications: %v", err)
+			}
+
+			return 0, errMsg
+		}
+
 		retryErr = retrier.Do(
 			func() error {
 				// Send transaction (master→user)
-				hash, err := chainService.SendTransaction("master", nil, cfg.NativeToken, userAddr, transferFeeAmount, "")
+				hash, err := chainService.SendTransaction("master", nil, networkCfg.NativeToken, userAddr, transferFeeAmount, "")
 				if err != nil {
 					return fmt.Errorf("failed to send native token from master to user: %w", err)
 				}
 
-				log.Printf("%s token sent from master to user wallet, hash: '%s'", cfg.NativeToken, hash)
+				log.Printf("%s token sent from master to user wallet, hash: '%s'", networkCfg.NativeToken, hash)
 				return nil
 			},
 		)
@@ -256,7 +307,7 @@ func TransferTokensToMasterWallet(ctx context.Context, chainService ChainService
 
 		// Delay to wait for confirm native token transaction (block time seconds)
 		select {
-		case <-time.After(time.Duration(cfg.BlockTime) * time.Second):
+		case <-time.After(time.Duration(networkCfg.BlockTime) * time.Second):
 		case <-ctx.Done():
 			return 0, fmt.Errorf("[TransferTokensToMasterWallet] Context cancelled during delay: %w", ctx.Err())
 		}
@@ -266,17 +317,17 @@ func TransferTokensToMasterWallet(ctx context.Context, chainService ChainService
 	retryErr = retrier.Do(
 		func() error {
 			// If currency = nativeToken, subtract commission from amount
-			if currency != cfg.NativeToken {
+			if currency != networkCfg.NativeToken {
 				amount = amount - transferFeeAmount
 			}
 
-			// Send transaction (user→bybit)
-			uHash, err := chainService.SendTransaction("user", &userId, currency, cfg.BybitAddress, amount, "")
+			// Send transaction (user→Bybit)
+			uHash, err := chainService.SendTransaction("user", &userId, currency, networkCfg.BybitAddress, amount, "")
 			if err != nil {
 				return fmt.Errorf("failed to send tokens from user to master: %w", err)
 			}
 
-			log.Printf("%s token transfer from user %s to master, hash: '%s'", currency, userId, uHash)
+			log.Printf("%s token transfer from user %d to master, hash: '%s'", currency, userId, uHash)
 			return nil
 		},
 	)
@@ -289,6 +340,7 @@ func TransferTokensToMasterWallet(ctx context.Context, chainService ChainService
 }
 
 // CreateWithdrawRequest Put new withdraw request in the queue and return queue_id
+// userId: User id
 // currency: Token ticker
 // network: Network code
 // address: Withdrawal address
@@ -296,12 +348,15 @@ func TransferTokensToMasterWallet(ctx context.Context, chainService ChainService
 // memo: Memo tag (for TON only)
 // amlId: AML address check id
 // Returns: Withdraw request queue id
-func CreateWithdrawRequest(currency, network, address string, amount float64, memo, amlId string) (map[string]any, error) {
+func CreateWithdrawRequest(
+	userId uint, currency, network, address string, amount float64, memo, amlId string,
+) (map[string]any, error) {
 	// Load config
 	cfg, _ := config.Load()
 
 	// Get withdraw request item encoded in JSON
 	reqItem, err := json.Marshal(map[string]any{
+		"user_id":  userId,
 		"currency": currency,
 		"network":  network,
 		"address":  address,

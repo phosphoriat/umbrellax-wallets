@@ -19,6 +19,7 @@ func NewUserRepository() *UserRepository {
 }
 
 // GetList Get list of all users
+// Returns: User models list
 func (r *UserRepository) GetList() ([]models.User, error) {
 	var users []models.User
 
@@ -31,11 +32,12 @@ func (r *UserRepository) GetList() ([]models.User, error) {
 }
 
 // GetUserIdByNumber Get user id by number
+// Returns: User id
 func (r *UserRepository) GetUserIdByNumber(number string) (uint, error) {
 	var user models.User
 
 	err := r.db.Where("number = ?", number).
-		Find(&user).Error
+		First(&user).Error
 	if err != nil {
 		return 0, err
 	}
@@ -43,10 +45,10 @@ func (r *UserRepository) GetUserIdByNumber(number string) (uint, error) {
 	return user.UserId, nil
 }
 
-// FirstOrCreate Create new user, if not exists
-func (r *UserRepository) FirstOrCreate(user *models.User) (*models.User, error) {
-	err := r.db.Where("user_id = ?", user.UserId).
-		FirstOrCreate(user).Error
+// Create new user (ReplacingMergeTree handles duplicates)
+// Returns: Created User model
+func (r *UserRepository) Create(user *models.User) (*models.User, error) {
+	err := r.db.Create(user).Error
 	if err != nil {
 		return nil, err
 	}

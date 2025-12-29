@@ -131,7 +131,7 @@ func (eth *Ethereum) GetUserWallet(userId uint32) (map[string]any, error) {
 	}
 
 	// Get ERC20 token balances
-	balances := make(map[string]any)
+	balances := make(map[string]float64)
 	for token, contractAddr := range config.ContractsAddresses[eth.NetworkCode] {
 		tokenBalance, err := eth.getErc20Balance(contractAddr, userAddr)
 		if err != nil {
@@ -189,6 +189,35 @@ func (eth *Ethereum) GetMasterWallet() (map[string]any, error) {
 		"address":  masterAddr,
 		"balances": balances,
 	}, nil
+}
+
+// GetUserWalletBalance Get token balance amount for user wallet
+// userId: User id
+// currency: Token ticker
+// Returns Balance amount for token
+func (eth *Ethereum) GetUserWalletBalance(userId uint32, currency string) (float64, error) {
+	// Get user wallet address
+	userAddr, _, err := eth.getWallet("user", &userId)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get user wallet address: %w", err)
+	}
+
+	var balance float64
+	if currency == "ETH" {
+		balance, err = eth.getNativeBalance(userAddr)
+	} else {
+		contractAddr, ok := config.ContractsAddresses[eth.NetworkCode][currency]
+		if !ok {
+			return 0, fmt.Errorf("unsupported currency %q on network %s", currency, eth.NetworkCode)
+		}
+
+		balance, err = eth.getErc20Balance(contractAddr, userAddr)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("failed to get balance for user %d: %w", userId, err)
+	}
+
+	return balance, nil
 }
 
 // GetTransactionCommission Get transaction commission

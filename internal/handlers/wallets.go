@@ -43,7 +43,6 @@ func (h *WalletsHandler) GetUserWalletAddress(c *fiber.Ctx) error {
 		UserNumber: c.Query("user_number"),
 		Network:    c.Query("network"),
 	}
-
 	if err := middleware.ValidateStruct(params); err != nil {
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -62,7 +61,6 @@ func (h *WalletsHandler) GetUserWalletInfo(c *fiber.Ctx) error {
 		UserId:  uint(c.QueryInt("user_id")),
 		Network: c.Query("network"),
 	}
-
 	if err := middleware.ValidateStruct(params); err != nil {
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
 	}
@@ -80,7 +78,6 @@ func (h *WalletsHandler) GetMasterWalletInfo(c *fiber.Ctx) error {
 	params := &GetMasterWalletQuery{
 		Network: c.Query("network"),
 	}
-
 	if err := middleware.ValidateStruct(params); err != nil {
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
 	}

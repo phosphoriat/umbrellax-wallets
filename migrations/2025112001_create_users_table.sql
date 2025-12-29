@@ -1,8 +1,11 @@
 -- +goose Up
-CREATE TABLE users (
+CREATE TABLE users
+(
     created_at DateTime DEFAULT now(),
-    user_id UInt32,
-    number String
+    user_id    UInt64,
+    number     String,
+
+    INDEX      idx_number number TYPE bloom_filter(0.01) GRANULARITY 1
 ) ENGINE = ReplacingMergeTree(created_at)
 PRIMARY KEY user_id
 ORDER BY user_id
