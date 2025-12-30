@@ -48,7 +48,7 @@ func (s *TransactionsService) GetTransactionStatus(network, hash, toAddr string)
 }
 
 // SendWithdrawal Send new withdraw to the queue and return queue_id
-func (s *TransactionsService) SendWithdrawal(network, currency, to string, amount float64, memo string) (map[string]any, error) {
+func (s *TransactionsService) SendWithdrawal(userId uint, network, currency, to string, amount float64, memo string) (map[string]any, error) {
 	// Get chain service instance from registry
 	_, err := chains.GetChainService(network)
 	if err != nil {
@@ -65,7 +65,7 @@ func (s *TransactionsService) SendWithdrawal(network, currency, to string, amoun
 		return nil, fmt.Errorf("failed to send withdrawal transaction to '%s' in %s: %s AML risk", to, network, riskLevel)
 	}
 
-	res, err := chains.CreateWithdrawRequest(currency, network, to, amount, memo, amlId)
+	res, err := chains.CreateWithdrawRequest(userId, currency, network, to, amount, memo, amlId)
 	if err != nil {
 		return nil, err
 	}

@@ -98,7 +98,7 @@ func (h *TransactionsHandler) SendWithdrawal(c *fiber.Ctx) error {
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
 	}
 
-	res, err := h.service.SendWithdrawal(params.Network, params.Currency, params.To, params.Amount, params.Memo)
+	res, err := h.service.SendWithdrawal(params.UserId, params.Network, params.Currency, params.To, params.Amount, params.Memo)
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
