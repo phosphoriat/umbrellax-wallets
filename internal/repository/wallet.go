@@ -18,25 +18,6 @@ func NewWalletRepository() *WalletRepository {
 	}
 }
 
-// GetRefilled Get refilled wallets
-// Returns: Wallet models list
-func (r *WalletRepository) GetRefilled(userId uint) ([]models.Wallet, error) {
-	var wallets []models.Wallet
-
-	query := r.db.Model(&models.Wallet{})
-	if userId > 0 {
-		query = query.Where("user_id = ?", userId)
-	}
-
-	err := query.Where("is_refilled = ?", true).
-		Find(&wallets).Error
-	if err != nil {
-		return nil, err
-	}
-
-	return wallets, nil
-}
-
 // GetAddressListByNetwork Get address list by network
 // network: Network code
 // Returns: map[address]userId
@@ -99,19 +80,4 @@ func (r *WalletRepository) Create(wallet *models.Wallet) (*models.Wallet, error)
 	}
 
 	return wallet, nil
-}
-
-// SetRefilled Update is_refilled flag via insert (ReplacingMergeTree handles merge)
-func (r *WalletRepository) SetRefilled(userId uint, network string, isRefilled bool) error {
-	var wallet models.Wallet
-
-	err := r.db.Where("user_id = ? AND network = ?", userId, network).
-		First(&wallet).Error
-	if err != nil {
-		return err
-	}
-
-	wallet.IsRefilled = isRefilled
-
-	return r.db.Create(&wallet).Error
 }

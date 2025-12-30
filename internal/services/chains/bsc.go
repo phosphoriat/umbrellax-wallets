@@ -238,7 +238,7 @@ func (bsc *Bsc) GetTransactionCommission(oType, wType string, wId *uint32, curre
 	var chainFee float64 = 0
 	switch currency {
 	case "BNB":
-		chainFee, err = bsc.calcNativeFee(walletAddr, toAddr, amount)
+		chainFee, err = bsc.calcNativeFee()
 	default:
 		chainFee, err = bsc.calcBep20Fee(currency, walletAddr, toAddr, amount)
 	}
@@ -731,11 +731,8 @@ func (bsc *Bsc) getBep20Balance(contractAddr, addr string) (float64, error) {
 
 /* GetTransactionCommission private methods group */
 // @private calcNativeFee Calc fee for BNB transaction
-// fromAddr: Wallet address
-// toAddr: Address for withdrawal
-// amount: Amount in float value
 // Returns: Fee in BNB
-func (bsc *Bsc) calcNativeFee(fromAddr, toAddr string, amount float64) (float64, error) {
+func (bsc *Bsc) calcNativeFee() (float64, error) {
 	// Get BNB decimals from config
 	bnbDecimals := config.TokenSettings[bsc.NetworkCode]["BNB"].Decimals
 
@@ -831,7 +828,7 @@ func (bsc *Bsc) sendNative(fromAddr, toAddr string, amount float64, privateKey s
 		return "", fmt.Errorf("failed to get BNB balance: %w", err)
 	}
 	// Get tx fee (in BNB)
-	txFee, err := bsc.calcNativeFee(fromAddr, toAddr, amount)
+	txFee, err := bsc.calcNativeFee()
 	if err != nil {
 		return "", fmt.Errorf("failed to get BNB tx fee: %w", err)
 	}

@@ -73,10 +73,11 @@ type Config struct {
 	BtcNodeUser  string
 	BtcNodePass  string
 	// Notifications
-	TelegramGroupId  int
-	TelegramBotToken string
-	MessengerApiUrl  string
-	MessengerChatId  int
+	TelegramGroupId   int64
+	TelegramBotToken  string
+	MessengerApiUrl   string
+	MessengerBotId    string
+	MessengerBotToken string
 }
 
 // Load config from env and return Config struct
@@ -152,10 +153,11 @@ func Load() (*Config, error) {
 		BtcNodeUser:  getEnv("BTC_NODE_USER", ""),
 		BtcNodePass:  getEnv("BTC_NODE_PASS", ""),
 		// Notifications
-		TelegramGroupId:  getEnvInt("TELEGRAM_GROUP_ID", 0),
-		TelegramBotToken: getEnv("TELEGRAM_BOT_TOKEN", ""),
-		MessengerApiUrl:  getEnv("MESENGER_API_URL", ""),
-		MessengerChatId:  getEnvInt("MESSENGER_CHAT_ID", 0),
+		TelegramGroupId:   int64(getEnvInt("TELEGRAM_GROUP_ID", 0)),
+		TelegramBotToken:  getEnv("TELEGRAM_BOT_TOKEN", ""),
+		MessengerApiUrl:   getEnv("MESSENGER_API_URL", ""),
+		MessengerBotId:    getEnv("MESSENGER_BOT_ID", ""),
+		MessengerBotToken: getEnv("MESSENGER_BOT_TOKEN", ""),
 	}, nil
 }
 

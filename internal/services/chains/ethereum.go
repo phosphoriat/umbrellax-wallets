@@ -239,7 +239,7 @@ func (eth *Ethereum) GetTransactionCommission(oType, wType string, wId *uint32, 
 	var chainFee float64 = 0
 	switch currency {
 	case "ETH":
-		chainFee, err = eth.calcNativeFee(walletAddr, toAddr, amount)
+		chainFee, err = eth.calcNativeFee()
 	default:
 		chainFee, err = eth.calcErc20Fee(currency, walletAddr, toAddr, amount)
 	}
@@ -729,11 +729,8 @@ func (eth *Ethereum) getErc20Balance(contractAddr, addr string) (float64, error)
 
 /* GetTransactionCommission private methods group */
 // @private calcNativeFee Calc fee for ETH transaction
-// fromAddr: Wallet address
-// toAddr: Address for withdrawal
-// amount: Amount in float value
 // Returns: Fee in ETH
-func (eth *Ethereum) calcNativeFee(fromAddr, toAddr string, amount float64) (float64, error) {
+func (eth *Ethereum) calcNativeFee() (float64, error) {
 	// Get ETH decimals from config
 	ethDecimals := config.TokenSettings[eth.NetworkCode]["ETH"].Decimals
 
@@ -828,7 +825,7 @@ func (eth *Ethereum) sendNative(fromAddr, toAddr string, amount float64, private
 		return "", fmt.Errorf("failed to get ETH balance: %w", err)
 	}
 	// Get tx fee (in ETH)
-	txFee, err := eth.calcNativeFee(fromAddr, toAddr, amount)
+	txFee, err := eth.calcNativeFee()
 	if err != nil {
 		return "", fmt.Errorf("failed to get ETH tx fee: %w", err)
 	}

@@ -47,7 +47,6 @@ const (
 	BtcBaseTxSize       = 10 // Base transaction size (version (4) + locktime (4) + segwit marker/flag (2))
 	BtcInputSize        = 68 // Input size (outpoint (36) + scriptSig (1) + sequence (4) + witness (~27 vbytes))
 	BtcOutputSizeP2WPKH = 31 // Native SegWit output size (P2WPKH) (value (8) + scriptPubKey length (1) + P2WPKH script (22))
-	BtcOutputSizeP2PKH  = 34 // Legacy output size (value (8) + scriptPubKey length (1) + P2PKH script (25))
 )
 
 // GetBitcoin Get Bitcoin chain instance
@@ -798,7 +797,7 @@ func (btc *Bitcoin) getUTXOData(fromAddress btcutil.Address, amountSatoshi btcut
 	// Fallback - if no UTXOs, estimate fee for typical transaction
 	if len(unspentList) == 0 {
 		// Typical P2WPKH tx: 1 input + 2 outputs ≈ 140 vBytes
-		txVSize := 140
+		txVSize := BtcBaseTxSize + BtcInputSize + (2 * BtcOutputSizeP2WPKH)
 		estimatedFee, _ := btcutil.NewAmount(float64(txVSize) / 1000 * feeRateBTCPerKB)
 		return nil, 0, estimatedFee, nil // Return only fee estimate
 	}
@@ -807,10 +806,6 @@ func (btc *Bitcoin) getUTXOData(fromAddress btcutil.Address, amountSatoshi btcut
 	sort.Slice(unspentList, func(i, j int) bool {
 		return unspentList[i].Amount > unspentList[j].Amount
 	})
-
-	// Assume 2 outputs: recipient + change (both P2WPKH for estimation)
-	numOutputs := 2
-	outputsSize := numOutputs * BtcOutputSizeP2WPKH
 
 	// Select UTXOs needed to cover amount + estimated fee
 	var selectedUTXOs []btcjson.ListUnspentResult
@@ -827,7 +822,8 @@ func (btc *Bitcoin) getUTXOData(fromAddress btcutil.Address, amountSatoshi btcut
 		totalInput += utxoAmount
 
 		// Calculate virtual size
-		txVSize := BtcBaseTxSize + (len(selectedUTXOs) * BtcInputSize) + outputsSize
+		// Assume 2 outputs: recipient + change (both P2WPKH for estimation)
+		txVSize := BtcBaseTxSize + (len(selectedUTXOs) * BtcInputSize) + (2 * BtcOutputSizeP2WPKH)
 		// Fee = vsize * feeRate (convert from BTC/kB to BTC)
 		estimatedFee, _ = btcutil.NewAmount(float64(txVSize) / 1000 * feeRateBTCPerKB)
 

@@ -38,7 +38,7 @@ func (r *ActionRepository) GetList(userId uint, aType, status string) ([]models.
 		query = query.Where("status = ?", status)
 	}
 
-	err := query.Order("id DESC").
+	err := query.Order("id ASC").
 		Find(&actions).Error
 	if err != nil {
 		return nil, err

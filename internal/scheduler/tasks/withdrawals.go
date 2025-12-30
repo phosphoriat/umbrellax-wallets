@@ -127,17 +127,15 @@ func (t *WithdrawalsTask) processItem(ctx context.Context, requestId, itemStr st
 		// Add transaction item in withdrawals Redis HASH
 		t.redis.HSet(ctx, t.RedisWithdrawalsKey, requestId, txItem)
 
-		// Register withdrawal action
+		// Register withdrawal action in DB
 		_, err = actionRepo.Create(&models.Action{
-			UserId: item.UserId,
-			Type:   "withdrawal",
-			Data: map[string]any{
-				"network": item.Network,
-				"token":   item.Currency,
-				"amount":  item.Amount,
-				"hash":    txHash,
-			},
-			Status: wStatus,
+			UserId:   item.UserId,
+			Type:     "withdrawal",
+			Network:  item.Network,
+			Currency: item.Currency,
+			Amount:   item.Amount,
+			Hash:     txHash,
+			Status:   wStatus,
 		})
 		if err != nil {
 			log.Printf("Failed to create withdrawal action in network %s for user %d: %v",

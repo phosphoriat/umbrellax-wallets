@@ -19,10 +19,12 @@ import (
 
 // Client Notification HTTP client struct
 type Client struct {
-	apiUrl          string
-	httpClient      *http.Client
-	botClient       *telebot.Bot
-	telegramGroupId int64
+	httpClient        *http.Client
+	MessengerApiUrl   string
+	MessengerBotId    string
+	MessengerBotToken string
+	botClient         *telebot.Bot
+	telegramGroupId   int64
 }
 
 // Global package vars
@@ -54,10 +56,12 @@ func newNotificationClient() *Client {
 	}
 
 	return &Client{
-		apiUrl:          cfg.MessengerApiUrl,
-		httpClient:      &http.Client{Timeout: 5 * time.Second},
-		botClient:       botClient,
-		telegramGroupId: int64(cfg.TelegramGroupId),
+		httpClient:        &http.Client{Timeout: 5 * time.Second},
+		MessengerApiUrl:   cfg.MessengerApiUrl,
+		MessengerBotId:    cfg.MessengerBotId,
+		MessengerBotToken: cfg.MessengerBotToken,
+		botClient:         botClient,
+		telegramGroupId:   cfg.TelegramGroupId,
 	}
 }
 
@@ -100,7 +104,7 @@ func (c *Client) sendTelegramNotification(message string) error {
 		_, err := c.botClient.Send(telebot.ChatID(c.telegramGroupId), message)
 		return err
 	}
-	
+
 	return nil
 }
 
@@ -108,16 +112,20 @@ func (c *Client) sendTelegramNotification(message string) error {
 // ctx: Current context
 // message: Error message
 func (c *Client) sendMessengerNotification(ctx context.Context, message string) error {
-	if c.apiUrl != "" {
+	if c.MessengerApiUrl != "" {
 		// Create request payload
-		data, err := json.Marshal(map[string]any{"message": message})
+		data, err := json.Marshal(map[string]any{
+			"bot_id":    c.MessengerBotId,
+			"bot_token": c.MessengerBotToken,
+			"message":   message,
+		})
 		if err != nil {
 			return fmt.Errorf("[Messenger API] JSON payload serialize error: %w", err)
 		}
 		payload := bytes.NewReader(data)
 
 		// Create new request entity
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.apiUrl, payload)
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.MessengerApiUrl, payload)
 		if err != nil {
 			return fmt.Errorf("[Messenger API] Failed to create request: %w", err)
 		}
