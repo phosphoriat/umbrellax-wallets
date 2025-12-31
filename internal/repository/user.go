@@ -20,10 +20,13 @@ func NewUserRepository() *UserRepository {
 
 // GetList Get list of all users
 // Returns: User models list
-func (r *UserRepository) GetList() ([]models.User, error) {
+func (r *UserRepository) GetList(limit, offset int) ([]models.User, error) {
 	var users []models.User
 
-	err := r.db.Order("created_at DESC").Find(&users).Error
+	err := r.db.Order("created_at DESC").
+		Limit(limit).
+		Offset(offset).
+		Find(&users).Error
 	if err != nil {
 		return nil, err
 	}
@@ -45,13 +48,24 @@ func (r *UserRepository) GetUserIdByNumber(number string) (uint, error) {
 	return user.UserId, nil
 }
 
-// Create new user (ReplacingMergeTree handles duplicates)
-// Returns: Created User model
-func (r *UserRepository) Create(user *models.User) (*models.User, error) {
-	err := r.db.Create(user).Error
+// CreateIfNotExists Create user if not exists
+// Returns: created (true if new user was created)
+func (r *UserRepository) CreateIfNotExists(user *models.User) (bool, error) {
+	var exists bool
+
+	err := r.db.Raw(`SELECT EXISTS(SELECT 1 FROM users WHERE user_id = ?)`,
+		user.UserId).Scan(&exists).Error
 	if err != nil {
-		return nil, err
+		return false, err
+	}
+	if exists {
+		return false, nil
 	}
 
-	return user, nil
+	err = r.db.Create(user).Error
+	if err != nil {
+		return false, err
+	}
+
+	return true, nil
 }

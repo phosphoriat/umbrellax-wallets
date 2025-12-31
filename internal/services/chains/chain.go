@@ -136,7 +136,7 @@ func ProcessInboundTransactions(
 				// Try to transfer tokens from user to master wallet and get transfer fee (in native network token)
 				var transferStatus = "success"
 				transferFeeAmount, uHash, err := TransferTokensToMasterWallet(
-					ctx, walletRepo, chainService, uint32(tx.UserId), tx.Currency, tx.To, tx.Amount,
+					ctx, chainService, uint32(tx.UserId), tx.Currency, tx.To, tx.Amount,
 				)
 				if err != nil {
 					log.Printf("[ProcessInboundTransactions] [%s] Failed to transfer tokens to master wallet: %v",
@@ -222,7 +222,6 @@ func ProcessInboundTransactions(
 // TransferTokensToMasterWallet Transfer tokens from user→master wallet (with retrying)
 // @note In current version at Bybit wallet
 // ctx: Current process context
-// walletRepo: Wallet repository instance
 // chainService: Network service instance
 // userId: User id
 // currency: Token ticker
@@ -230,7 +229,7 @@ func ProcessInboundTransactions(
 // amount: Amount in float value
 // Returns: Transfer fee amount (in native network token value) and hash of user→master tx
 func TransferTokensToMasterWallet(
-	ctx context.Context, walletRepo *repository.WalletRepository, chainService ChainService, userId uint32, currency, userAddr string, amount float64,
+	ctx context.Context, chainService ChainService, userId uint32, currency, userAddr string, amount float64,
 ) (float64, string, error) {
 	// Get network data from config
 	network := chainService.GetCode()
@@ -255,91 +254,104 @@ func TransferTokensToMasterWallet(
 		transferFeeAmount, masterFeeAmount float64
 	)
 
-	// Calc needed fee amount (in native network token) for sending tokens from user to Bybit wallet
-	retryErr = retrier.Do(
-		func() error {
-			// Calc fee amount for user→Bybit transfer
-			userFee, err := chainService.GetTransactionCommission("inner", "user", &userId, currency, networkCfg.BybitAddress, amount, "")
-			if err != nil {
-				return fmt.Errorf("failed to get transaction commission: %w", err)
-			}
-			// Add fee buffer
-			transferFeeAmount = userFee["chain_fee"] + userFee["chain_fee"]*networkCfg.FeeBuffer
-
-			// Calc fee amount for master→user native token transfer
-			masterFee, err := chainService.GetTransactionCommission("inner", "master", &userId, currency, userAddr, amount, "")
-			if err != nil {
-				return fmt.Errorf("failed to get transaction commission: %w", err)
-			}
-			masterFeeAmount = masterFee["chain_fee"]
-
-			return nil
-		},
-	)
-	if retryErr != nil {
-		return 0, "", fmt.Errorf("[TransferTokensToMasterWallet] GetTransactionCommission step failed: %w", retryErr)
-	}
-
-	// Send native token for fee payment from master to user wallet, if currency != native token
-	if currency != networkCfg.NativeToken {
-		// Check needed amount of native token in master wallet
-		balance, err := chainService.GetUserWalletBalance(userId, currency)
-		if err != nil {
-			return 0, "", fmt.Errorf("[TransferTokensToMasterWallet] Failed to get user %s balance: %w", currency, err)
-		}
-		if balance < transferFeeAmount {
-			errMsg := fmt.Errorf("[TransferTokensToMasterWallet] Not enough master wallet %s balance", networkCfg.NativeToken)
-
-			// Send notifications to channels
-			err := notifications.GetClient().SendNotifications(ctx, errMsg.Error())
-			if err != nil {
-				log.Printf("[TransferTokensToMasterWallet] Failed to send notifications: %v", err)
-			}
-
-			return 0, "", errMsg
-		}
-
+	// If network is not ton
+	if network != GetTon().GetCode() {
+		// Calc needed fee amount (in native network token) for sending tokens from user to Bybit wallet
 		retryErr = retrier.Do(
 			func() error {
-				// Send transaction (master→user)
-				hash, err := chainService.SendTransaction("master", nil, networkCfg.NativeToken, userAddr, transferFeeAmount, "")
+				// Calc fee amount for user→Bybit transfer
+				userFee, err := chainService.GetTransactionCommission("inner", "user", &userId, currency, networkCfg.BybitAddress, amount, "")
 				if err != nil {
-					return fmt.Errorf("failed to send native token from master to user: %w", err)
+					return fmt.Errorf("failed to get transaction commission: %w", err)
 				}
+				// Add fee buffer
+				transferFeeAmount = userFee["chain_fee"] + userFee["chain_fee"]*networkCfg.FeeBuffer
 
-				log.Printf("%s token sent from master to user wallet, hash: '%s'", networkCfg.NativeToken, hash)
+				// Calc fee amount for master→user native token transfer
+				masterFee, err := chainService.GetTransactionCommission("inner", "master", &userId, currency, userAddr, amount, "")
+				if err != nil {
+					return fmt.Errorf("failed to get transaction commission: %w", err)
+				}
+				masterFeeAmount = masterFee["chain_fee"]
+
 				return nil
 			},
 		)
 		if retryErr != nil {
-			return 0, "", fmt.Errorf("[TransferTokensToMasterWallet] SendNativeTokenToUser step failed: %w", retryErr)
+			return 0, "", fmt.Errorf("[TransferTokensToMasterWallet] GetTransactionCommission step failed: %w", retryErr)
 		}
 
-		// Delay to wait for confirm native token transaction (block time seconds)
-		select {
-		case <-time.After(time.Duration(networkCfg.BlockTime) * time.Second):
-		case <-ctx.Done():
-			return 0, "", fmt.Errorf("[TransferTokensToMasterWallet] Context cancelled during delay: %w", ctx.Err())
+		// Send native token for fee payment from master to user wallet, if currency != native token
+		if currency != networkCfg.NativeToken {
+			// Check needed amount of native token in master wallet
+			balance, err := chainService.GetUserWalletBalance(userId, currency)
+			if err != nil {
+				return 0, "", fmt.Errorf("[TransferTokensToMasterWallet] Failed to get user %s balance: %w", currency, err)
+			}
+			if balance < transferFeeAmount {
+				errMsg := fmt.Errorf("[TransferTokensToMasterWallet] Not enough master wallet %s balance", networkCfg.NativeToken)
+
+				// Send notifications to channels
+				err := notifications.GetClient().SendNotifications(ctx, errMsg.Error())
+				if err != nil {
+					log.Printf("[TransferTokensToMasterWallet] Failed to send notifications: %v", err)
+				}
+
+				return 0, "", errMsg
+			}
+
+			retryErr = retrier.Do(
+				func() error {
+					// Send transaction (master→user)
+					fHash, err := chainService.SendTransaction("master", nil, networkCfg.NativeToken, userAddr, transferFeeAmount, "")
+					if err != nil {
+						return fmt.Errorf("failed to send native token from master to user: %w", err)
+					}
+
+					log.Printf("%s token sent from master to user wallet, hash: '%s'", networkCfg.NativeToken, fHash)
+					return nil
+				},
+			)
+			if retryErr != nil {
+				return 0, "", fmt.Errorf("[TransferTokensToMasterWallet] SendNativeTokenToUser step failed: %w", retryErr)
+			}
+
+			// Delay to wait for confirm native token transaction (block time seconds)
+			select {
+			case <-time.After(time.Duration(networkCfg.BlockTime) * time.Second):
+			case <-ctx.Done():
+				return 0, "", fmt.Errorf("[TransferTokensToMasterWallet] Context cancelled during delay: %w", ctx.Err())
+			}
 		}
 	}
 
 	// Send tokens from user to Bybit wallet
-	var uHash string
+	var hash string
 	retryErr = retrier.Do(
 		func() error {
-			// If currency = nativeToken, subtract commission from amount
-			if currency != networkCfg.NativeToken {
-				amount = amount - transferFeeAmount
-			}
-
-			// Send transaction (user→Bybit)
 			var err error
-			uHash, err := chainService.SendTransaction("user", &userId, currency, networkCfg.BybitAddress, amount, "")
-			if err != nil {
-				return fmt.Errorf("failed to send tokens from user to master: %w", err)
+
+			if network != GetTon().GetCode() {
+				// If currency = nativeToken, subtract commission from amount
+				if currency != networkCfg.NativeToken && transferFeeAmount > 0 {
+					amount = amount - transferFeeAmount
+				}
+
+				// Send transaction (user→Bybit) for all networks, excluding ton
+				hash, err = chainService.SendTransaction("user", &userId, currency, networkCfg.BybitAddress, amount, "")
+				if err != nil {
+					return fmt.Errorf("failed to send tokens from user to Bybit: %w", err)
+				}
+
+			} else {
+				// Send transaction (master→Bybit) for ton
+				hash, err = chainService.SendTransaction("master", nil, currency, networkCfg.BybitAddress, amount, "")
+				if err != nil {
+					return fmt.Errorf("failed to send tokens from master to Bybit: %w", err)
+				}
 			}
 
-			log.Printf("%s token transfer from user %d to master, hash: '%s'", currency, userId, uHash)
+			log.Printf("%s token transfer from user %d to master, hash: '%s'", currency, userId, hash)
 			return nil
 		},
 	)
@@ -348,7 +360,7 @@ func TransferTokensToMasterWallet(
 	}
 
 	// Return master→user and user→bybit total transfers commission
-	return transferFeeAmount + masterFeeAmount, uHash, nil
+	return transferFeeAmount + masterFeeAmount, hash, nil
 }
 
 // CreateWithdrawRequest Put new withdraw request in the queue and return queue_id

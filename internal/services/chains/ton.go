@@ -377,12 +377,12 @@ func (ton *Ton) GetInboundTransactions(ctx context.Context) ([]*InboundTransacti
 
 	// Get last logical time (LT) from Redis
 	lastLTStr, err := redis.GetClient().HGet(ctx, "last_blocks", ton.NetworkCode)
-	var lastLT uint64
+	var lastProcessedLT uint64
 	if err != nil || lastLTStr == "" {
-		lastLT = 0
+		lastProcessedLT = 0
 		log.Printf("[%s] First run, starting from LT 0", ton.NetworkCode)
 	} else {
-		lastLT, _ = strconv.ParseUint(lastLTStr, 10, 64)
+		lastProcessedLT, _ = strconv.ParseUint(lastLTStr, 10, 64)
 	}
 
 	// Get master wallet address from Vault
@@ -397,46 +397,92 @@ func (ton *Ton) GetInboundTransactions(ctx context.Context) ([]*InboundTransacti
 	// Get TON decimals from config
 	tonDecimals := config.TokenSettings[ton.NetworkCode]["TON"].Decimals
 
-	// Get transactions list for master address (up to 100 transactions)
-	queryLT := lastLT
-	if lastLT > 0 {
-		queryLT++
-	}
-
+	// Get current block
 	if err := limiter.Wait(ctx); err != nil {
 		return nil, err
 	}
-	txList, err := ton.Client.ListTransactions(ctx, masterAddr, 100, queryLT, nil)
+	block, err := ton.Client.CurrentMasterchainInfo(ctx)
 	if err != nil {
-		if strings.Contains(err.Error(), "no transactions were found") {
-			log.Printf("[%s] No transactions found yet", ton.NetworkCode)
-			return []*InboundTransaction{}, nil
-		}
-		return nil, fmt.Errorf("[%s] Failed to get transactions for master address: %w",
-			ton.NetworkCode, err)
+		return nil, fmt.Errorf("[%s] Failed to get masterchain info: %w", ton.NetworkCode, err)
 	}
 
-	// Check if tx list is not empty
-	if len(txList) == 0 {
-		log.Printf("[%s] No new txs to process", ton.NetworkCode)
+	// Get current account state
+	if err := limiter.Wait(ctx); err != nil {
+		return nil, err
+	}
+	account, err := ton.Client.GetAccount(ctx, block, masterAddr)
+	if err != nil {
+		return nil, fmt.Errorf("[%s] Failed to get account: %w", ton.NetworkCode, err)
+	}
+
+	// No transactions on account yet
+	if account.LastTxLT == 0 {
 		return []*InboundTransaction{}, nil
 	}
 
-	log.Printf("[%s] Processing %d transactions for master address from LT %d",
-		ton.NetworkCode, len(txList), lastLT)
+	// No new transactions since last check
+	if account.LastTxLT <= lastProcessedLT {
+		log.Printf("[%s] No new transactions to process (lastLT: %d, accountLT: %d)",
+			ton.NetworkCode, lastProcessedLT, account.LastTxLT)
+		return []*InboundTransaction{}, nil
+	}
+
+	// Collect all new transactions with pagination
+	var allNewTxs []*tlb.Transaction
+	currentLT := account.LastTxLT
+	currentHash := account.LastTxHash
+
+	// Paginate backwards until we reach lastProcessedLT
+	for currentLT > lastProcessedLT {
+		// Get transactions list for master address (up to 100 transactions)
+		if err := limiter.Wait(ctx); err != nil {
+			return nil, err
+		}
+		txList, err := ton.Client.ListTransactions(ctx, masterAddr, 100, currentLT, currentHash)
+		if err != nil {
+			if strings.Contains(err.Error(), "no transactions were found") {
+				log.Printf("[%s] No transactions found yet", ton.NetworkCode)
+				return []*InboundTransaction{}, nil
+			}
+			return nil, fmt.Errorf("[%s] Failed to get transactions for master address: %w",
+				ton.NetworkCode, err)
+		}
+
+		// Check if tx list is not empty
+		if len(txList) == 0 {
+			log.Printf("[%s] No new txs to process", ton.NetworkCode)
+			return []*InboundTransaction{}, nil
+		}
+
+		// Filter only new transactions (LT > lastProcessedLT)
+		for _, tx := range txList {
+			if tx.LT > lastProcessedLT {
+				allNewTxs = append(allNewTxs, tx)
+			}
+		}
+
+		// Move to older transactions (oldest is first in result)
+		oldest := txList[0]
+		if oldest.PrevTxLT == 0 || oldest.LT <= lastProcessedLT {
+			break
+		}
+		currentLT = oldest.PrevTxLT
+		currentHash = oldest.PrevTxHash
+	}
+
+	if len(allNewTxs) == 0 {
+		log.Printf("[%s] No new transactions to process", ton.NetworkCode)
+		return []*InboundTransaction{}, nil
+	}
+
+	log.Printf("[%s] Processing %d new transactions from LT %d to %d",
+		ton.NetworkCode, len(allNewTxs), lastProcessedLT, account.LastTxLT)
 
 	// Processed inbound transactions result list
 	inboundTxList := make([]*InboundTransaction, 0)
-	// Set max LT to last LT value
-	maxLT := lastLT
 
 	// Process transactions
-	for _, tx := range txList {
-		// Update maxLT for every transaction (processed or skipped)
-		if tx.LT > maxLT {
-			maxLT = tx.LT
-		}
-
+	for _, tx := range allNewTxs {
 		// Process only incoming internal messages
 		if tx.IO.In == nil || tx.IO.In.MsgType != tlb.MsgTypeInternal {
 			continue
@@ -642,16 +688,15 @@ func (ton *Ton) GetInboundTransactions(ctx context.Context) ([]*InboundTransacti
 		}
 	}
 
-	// Save max LT as last processed in Redis
-	if maxLT > lastLT {
-		err = redis.GetClient().HSet(ctx, "last_blocks", ton.NetworkCode, maxLT)
-		if err != nil {
-			return nil, fmt.Errorf("[%s] Failed to save last LT in Redis: %w", ton.NetworkCode, err)
-		}
-		log.Printf("[%s] Saved last LT: %d", ton.NetworkCode, maxLT)
+	// Save max LT (latest transaction LT) as last processed in Redis
+	err = redis.GetClient().HSet(ctx, "last_blocks", ton.NetworkCode, account.LastTxLT)
+	if err != nil {
+		return nil, fmt.Errorf("[%s] Failed to save last LT in Redis: %w", ton.NetworkCode, err)
 	}
+	log.Printf("[%s] Saved last LT: %d", ton.NetworkCode, account.LastTxLT)
 
-	log.Printf("[%s] Processing finished successfully, found %d user transactions", ton.NetworkCode, len(inboundTxList))
+	log.Printf("[%s] Processing finished successfully, found %d user transactions",
+		ton.NetworkCode, len(inboundTxList))
 	return inboundTxList, nil
 }
 

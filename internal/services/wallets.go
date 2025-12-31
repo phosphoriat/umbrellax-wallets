@@ -36,8 +36,8 @@ func (s *WalletsService) GetUserWalletAddress(userId uint, userNumber, network s
 		return "", err
 	}
 
-	// Save user in users DB, if not exists
-	_, err = s.userRepo.Create(&models.User{
+	// Create user in users DB, if not exists
+	_, err = s.userRepo.CreateIfNotExists(&models.User{
 		UserId: userId,
 		Number: userNumber,
 	})
@@ -45,8 +45,8 @@ func (s *WalletsService) GetUserWalletAddress(userId uint, userNumber, network s
 		return "", err
 	}
 
-	// Save address in wallets DB, if not exists
-	_, err = s.walletRepo.Create(&models.Wallet{
+	// Create address in wallets DB, if not exists
+	_, err = s.walletRepo.CreateIfNotExists(&models.Wallet{
 		UserId:  userId,
 		Network: network,
 		Address: address,

@@ -1,7 +1,7 @@
 -- +goose Up
 CREATE TABLE users
 (
-    created_at DateTime DEFAULT now(),
+    created_at DateTime64(3) DEFAULT now64(3),
     user_id    UInt64,
     number     String,
 

@@ -1,6 +1,9 @@
 package repository
 
 import (
+	"sync"
+	"time"
+
 	"wallets/internal/database/clickhouse"
 	"wallets/internal/models"
 
@@ -8,13 +11,18 @@ import (
 )
 
 type WalletRepository struct {
-	db *gorm.DB
+	db         *gorm.DB
+	cache      map[string]map[string]uint
+	lastUpdate map[string]time.Time
+	mu         sync.RWMutex
 }
 
 // NewWalletRepository Create new instance of WalletRepository
 func NewWalletRepository() *WalletRepository {
 	return &WalletRepository{
-		db: clickhouse.GetDB(),
+		db:         clickhouse.GetDB(),
+		cache:      make(map[string]map[string]uint),
+		lastUpdate: make(map[string]time.Time),
 	}
 }
 
@@ -22,21 +30,41 @@ func NewWalletRepository() *WalletRepository {
 // network: Network code
 // Returns: map[address]userId
 func (r *WalletRepository) GetAddressListByNetwork(network string) (map[string]uint, error) {
-	var wallets []models.Wallet
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
-	err := r.db.Where("network = ?", network).
-		Order("created_at DESC").
-		Find(&wallets).Error
+	// Get last update cache time
+	lastTime := r.lastUpdate[network]
+
+	// First query - load all
+	if lastTime.IsZero() {
+		r.cache[network] = make(map[string]uint)
+		lastTime = time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
+	}
+
+	// Load only new items
+	var wallets []models.Wallet
+	err := r.db.Raw(`
+		SELECT address, user_id, created_at 
+		FROM wallets 
+		WHERE network = ? AND created_at > ? 
+		ORDER BY created_at ASC
+	`, network, lastTime).Scan(&wallets).Error
 	if err != nil {
 		return nil, err
 	}
 
-	addressList := make(map[string]uint, len(wallets))
-	for _, wallet := range wallets {
-		addressList[wallet.Address] = wallet.UserId
+	// Add new items in cache
+	for _, w := range wallets {
+		r.cache[network][w.Address] = w.UserId
 	}
 
-	return addressList, nil
+	// Write last update time (from last item)
+	if len(wallets) > 0 {
+		r.lastUpdate[network] = wallets[len(wallets)-1].CreatedAt
+	}
+
+	return r.cache[network], nil
 }
 
 // GetAddressByUserId Get address by user id and network
@@ -46,9 +74,8 @@ func (r *WalletRepository) GetAddressListByNetwork(network string) (map[string]u
 func (r *WalletRepository) GetAddressByUserId(userId uint, network string) (string, error) {
 	var wallet models.Wallet
 
-	err := r.db.Where("user_id = ?", userId).
-		Where("network = ?", network).
-		First(&wallet).Error
+	err := r.db.Raw(`SELECT * FROM wallets FINAL WHERE user_id = ? AND network = ? LIMIT 1`, userId, network).
+		Scan(&wallet).Error
 	if err != nil {
 		return "", err
 	}
@@ -62,8 +89,8 @@ func (r *WalletRepository) GetAddressByUserId(userId uint, network string) (stri
 func (r *WalletRepository) GetUserIdByAddress(address string) (uint, error) {
 	var wallet models.Wallet
 
-	err := r.db.Where("address = ?", address).
-		First(&wallet).Error
+	err := r.db.Raw(`SELECT * FROM wallets FINAL WHERE address = ? LIMIT 1`, address).
+		Scan(&wallet).Error
 	if err != nil {
 		return 0, err
 	}
@@ -71,13 +98,31 @@ func (r *WalletRepository) GetUserIdByAddress(address string) (uint, error) {
 	return wallet.UserId, nil
 }
 
-// Create new wallet (ReplacingMergeTree handles duplicates)
-// Returns: Created Wallet model
-func (r *WalletRepository) Create(wallet *models.Wallet) (*models.Wallet, error) {
-	err := r.db.Create(wallet).Error
+// CreateIfNotExists Create wallet if not exists
+// Returns: created (true if new wallet was created)
+func (r *WalletRepository) CreateIfNotExists(wallet *models.Wallet) (bool, error) {
+	var exists bool
+
+	err := r.db.Raw(`SELECT EXISTS(SELECT 1 FROM wallets WHERE user_id = ? AND network = ?)`,
+		wallet.UserId, wallet.Network).Scan(&exists).Error
 	if err != nil {
-		return nil, err
+		return false, err
+	}
+	if exists {
+		return false, nil
 	}
 
-	return wallet, nil
+	err = r.db.Create(wallet).Error
+	if err != nil {
+		return false, err
+	}
+
+	// Update address list cache
+	r.mu.Lock()
+	if r.cache[wallet.Network] != nil {
+		r.cache[wallet.Network][wallet.Address] = wallet.UserId
+	}
+	r.mu.Unlock()
+
+	return true, nil
 }
