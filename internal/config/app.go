@@ -63,15 +63,15 @@ type Config struct {
 	QuickNodeApiKey string
 	QuickNodeRps    int
 	// Chains
-	TronRpcUrl   string
-	EthRpcUrl    string
-	BscRpcUrl    string
-	SolRpcUrl    string
-	TonConfigUrl string
-	TonHttpUrl   string
-	BtcNodeUrl   string
-	BtcNodeUser  string
-	BtcNodePass  string
+	TronRpcUrl  string
+	EthRpcUrl   string
+	BscRpcUrl   string
+	SolRpcUrl   string
+	TonConfig   string
+	TonHttpUrl  string
+	BtcNodeUrl  string
+	BtcNodeUser string
+	BtcNodePass string
 	// Notifications
 	TelegramGroupId   int64
 	TelegramBotToken  string
@@ -143,15 +143,15 @@ func Load() (*Config, error) {
 		QuickNodeApiKey: getEnv("QUICKNODE_API_KEY", ""),
 		QuickNodeRps:    getEnvInt("QUICKNODE_RPS", 15),
 		// Chains
-		TronRpcUrl:   getEnv("TRON_RPC_URL", ""),
-		EthRpcUrl:    getEnv("ETH_RPC_URL", ""),
-		BscRpcUrl:    getEnv("BSC_RPC_URL", ""),
-		SolRpcUrl:    getEnv("SOL_RPC_URL", ""),
-		TonConfigUrl: getEnv("TON_CONFIG_URL", ""),
-		TonHttpUrl:   getEnv("TON_HTTP_URL", ""),
-		BtcNodeUrl:   getEnv("BTC_NODE_URL", ""),
-		BtcNodeUser:  getEnv("BTC_NODE_USER", ""),
-		BtcNodePass:  getEnv("BTC_NODE_PASS", ""),
+		TronRpcUrl:  getEnv("TRON_RPC_URL", ""),
+		EthRpcUrl:   getEnv("ETH_RPC_URL", ""),
+		BscRpcUrl:   getEnv("BSC_RPC_URL", ""),
+		SolRpcUrl:   getEnv("SOL_RPC_URL", ""),
+		TonConfig:   getEnv("TON_CONFIG", ""),
+		TonHttpUrl:  getEnv("TON_HTTP_URL", ""),
+		BtcNodeUrl:  getEnv("BTC_NODE_URL", ""),
+		BtcNodeUser: getEnv("BTC_NODE_USER", ""),
+		BtcNodePass: getEnv("BTC_NODE_PASS", ""),
 		// Notifications
 		TelegramGroupId:   int64(getEnvInt("TELEGRAM_GROUP_ID", 0)),
 		TelegramBotToken:  getEnv("TELEGRAM_BOT_TOKEN", ""),

@@ -438,7 +438,7 @@ func (bsc *Bsc) GetInboundTransactions(ctx context.Context) ([]*InboundTransacti
 				return
 			}
 
-			log.Printf("[%s] Processing block %d with %d raw transactions",
+			log.Printf("[%s] Processing block %d with %d raw txs",
 				bsc.NetworkCode, blockNum, len(block.Transactions()))
 
 			// Local goroutine tx list
@@ -600,7 +600,7 @@ func (bsc *Bsc) GetInboundTransactions(ctx context.Context) ([]*InboundTransacti
 		}
 	}
 
-	log.Printf("[%s] Processing finished successfully: processed %d blocks, found %d user transactions",
+	log.Printf("[%s] Searching finished successfully: processed %d blocks, found %d user raw txs",
 		bsc.NetworkCode, lastContinuousBlock-lastBlockNumber, len(txList))
 	return txList, nil
 }

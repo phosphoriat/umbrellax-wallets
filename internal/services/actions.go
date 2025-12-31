@@ -80,7 +80,7 @@ func (s *ActionsService) RunAutoTransfers(userId uint) ([]any, error) {
 					if balance > 0 {
 						// Try to transfer tokens from user to master wallet and get transfer fee (in native network token)
 						transferFeeAmount, uHash, err := chains.TransferTokensToMasterWallet(
-							context.Background(), s.walletRepo, chainService, uint32(action.UserId), currency, userWallet["address"].(string), balance,
+							context.Background(), chainService, uint32(action.UserId), currency, userWallet["address"].(string), balance,
 						)
 						if err != nil {
 							log.Printf("[RunAutoTransfers] [%s] Failed to transfer tokens to master wallet: %v",

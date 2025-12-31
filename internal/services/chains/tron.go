@@ -419,7 +419,7 @@ func (tron *Tron) GetInboundTransactions(ctx context.Context) ([]*InboundTransac
 				return
 			}
 
-			log.Printf("[%s] Processing block %d with %d raw transactions",
+			log.Printf("[%s] Processing block %d with %d raw txs",
 				tron.NetworkCode, blockNum, len(block.Transactions))
 
 			// Local goroutine tx list
@@ -600,7 +600,7 @@ func (tron *Tron) GetInboundTransactions(ctx context.Context) ([]*InboundTransac
 		}
 	}
 
-	log.Printf("[%s] Processing finished successfully: processed %d blocks, found %d user transactions",
+	log.Printf("[%s] Searching finished successfully: processed %d blocks, found %d user raw txs",
 		tron.NetworkCode, lastContinuousBlock-lastBlockNumber, len(txList))
 	return txList, nil
 }

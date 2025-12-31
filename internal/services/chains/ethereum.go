@@ -439,7 +439,7 @@ func (eth *Ethereum) GetInboundTransactions(ctx context.Context) ([]*InboundTran
 				return
 			}
 
-			log.Printf("[%s] Processing block %d with %d raw transactions",
+			log.Printf("[%s] Processing block %d with %d raw txs",
 				eth.NetworkCode, blockNum, len(block.Transactions()))
 
 			// Local goroutine tx list
@@ -598,7 +598,7 @@ func (eth *Ethereum) GetInboundTransactions(ctx context.Context) ([]*InboundTran
 		}
 	}
 
-	log.Printf("[%s] Processing finished successfully: processed %d blocks, found %d user transactions",
+	log.Printf("[%s] Searching finished successfully: processed %d blocks, found %d user raw txs",
 		eth.NetworkCode, lastContinuousBlock-lastBlockNumber, len(txList))
 	return txList, nil
 }

@@ -389,8 +389,8 @@ func (sol *Solana) GetInboundTransactions(ctx context.Context) ([]*InboundTransa
 		return []*InboundTransaction{}, nil
 	}
 
-	log.Printf("[%s] Processing transactions for %d user addresses from block %d to %d",
-		sol.NetworkCode, len(addressList), lastBlockNumber+1, currentBlockNum)
+	log.Printf("[%s] Processing %d blocks from %d to %d",
+		sol.NetworkCode, currentBlockNum-lastBlockNumber, lastBlockNumber+1, currentBlockNum)
 
 	var (
 		// Flag for getting versioned transactions
@@ -450,7 +450,7 @@ func (sol *Solana) GetInboundTransactions(ctx context.Context) ([]*InboundTransa
 				return
 			}
 
-			log.Printf("[%s] Processing block %d with %d raw transactions",
+			log.Printf("[%s] Processing block %d with %d raw txs",
 				sol.NetworkCode, blockNum, len(block.Transactions))
 
 			// Local goroutine tx list
@@ -466,7 +466,7 @@ func (sol *Solana) GetInboundTransactions(ctx context.Context) ([]*InboundTransa
 				// Get parsed transaction entity
 				parsedTx, err := tx.GetTransaction()
 				if err != nil {
-					log.Printf("[%s] Failed to get transaction in block %d: %v", sol.NetworkCode, blockNum, err)
+					log.Printf("[%s] Failed to get tx in block %d: %v", sol.NetworkCode, blockNum, err)
 					continue
 				}
 				// Get transaction message
@@ -726,7 +726,7 @@ func (sol *Solana) GetInboundTransactions(ctx context.Context) ([]*InboundTransa
 		}
 	}
 
-	log.Printf("[%s] Processing finished successfully: processed %d blocks, found %d user transactions",
+	log.Printf("[%s] Searching finished successfully: processed %d blocks, found %d user raw txs",
 		sol.NetworkCode, lastContinuousBlock-lastBlockNumber, len(txList))
 	return txList, nil
 }

@@ -9,6 +9,7 @@ import (
 	"log"
 	"math/big"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -69,11 +70,21 @@ func newTon() *Ton {
 
 	// Create new connection pool
 	client := liteclient.NewConnectionPool()
-	// Add connections to pool
-	err := client.AddConnectionsFromConfigUrl(context.Background(), cfg.TonConfigUrl)
+
+	// Add liteservers from config to pool
+	content, err := os.ReadFile(cfg.TonConfig)
 	if err != nil {
-		log.Fatalf("[Ton] Failed to connect to : %v", err)
+		log.Fatalf("[Ton] Failed to read liteserver config: %v", err)
 	}
+	var tonConfig liteclient.GlobalConfig
+	if err := json.Unmarshal(content, &tonConfig); err != nil {
+		log.Fatalf("[Ton] Failed to parse liteserver config: %v", err)
+	}
+	err = client.AddConnectionsFromConfig(context.Background(), &tonConfig)
+	if err != nil {
+		log.Fatalf("[Ton] Failed to connect: %v", err)
+	}
+
 	// Create new Ton API client
 	apiClient := ton.NewAPIClient(client).WithRetry(3)
 
@@ -88,7 +99,7 @@ func newTon() *Ton {
 			NativeToken: nativeToken,
 		},
 		Client:        apiClient,
-		RateLimit:     cfg.QuickNodeRps,
+		RateLimit:     10, // 10 for TonConsole 
 		WalletVersion: wallet.V4R2,
 		jettonCache:   make(map[string]*JettonInfo),
 	}
@@ -422,7 +433,7 @@ func (ton *Ton) GetInboundTransactions(ctx context.Context) ([]*InboundTransacti
 
 	// No new transactions since last check
 	if account.LastTxLT <= lastProcessedLT {
-		log.Printf("[%s] No new transactions to process (lastLT: %d, accountLT: %d)",
+		log.Printf("[%s] No new raw txs to search (lastLT: %d, accountLT: %d)",
 			ton.NetworkCode, lastProcessedLT, account.LastTxLT)
 		return []*InboundTransaction{}, nil
 	}
@@ -441,16 +452,16 @@ func (ton *Ton) GetInboundTransactions(ctx context.Context) ([]*InboundTransacti
 		txList, err := ton.Client.ListTransactions(ctx, masterAddr, 100, currentLT, currentHash)
 		if err != nil {
 			if strings.Contains(err.Error(), "no transactions were found") {
-				log.Printf("[%s] No transactions found yet", ton.NetworkCode)
+				log.Printf("[%s] No txs found yet at wallet", ton.NetworkCode)
 				return []*InboundTransaction{}, nil
 			}
-			return nil, fmt.Errorf("[%s] Failed to get transactions for master address: %w",
+			return nil, fmt.Errorf("[%s] Failed to get txs for master address: %w",
 				ton.NetworkCode, err)
 		}
 
 		// Check if tx list is not empty
 		if len(txList) == 0 {
-			log.Printf("[%s] No new txs to process", ton.NetworkCode)
+			log.Printf("[%s] No new raw txs to search", ton.NetworkCode)
 			return []*InboundTransaction{}, nil
 		}
 
@@ -471,11 +482,11 @@ func (ton *Ton) GetInboundTransactions(ctx context.Context) ([]*InboundTransacti
 	}
 
 	if len(allNewTxs) == 0 {
-		log.Printf("[%s] No new transactions to process", ton.NetworkCode)
+		log.Printf("[%s] No new raw txs to search", ton.NetworkCode)
 		return []*InboundTransaction{}, nil
 	}
 
-	log.Printf("[%s] Processing %d new transactions from LT %d to %d",
+	log.Printf("[%s] Start searching %d new raw txs from LT %d to %d",
 		ton.NetworkCode, len(allNewTxs), lastProcessedLT, account.LastTxLT)
 
 	// Processed inbound transactions result list
@@ -550,7 +561,7 @@ func (ton *Ton) GetInboundTransactions(ctx context.Context) ([]*InboundTransacti
 				Amount:   amount,
 			})
 
-			log.Printf("[%s] TON transaction '%s' processed successful", ton.NetworkCode, txHash)
+			log.Printf("[%s] %f TON raw tx '%s' found", ton.NetworkCode, amount, txHash)
 
 		// If it's a Jetton transfer (0x7362d09c - internal_transfer to wallet)
 		case 0x7362d09c:
@@ -683,8 +694,8 @@ func (ton *Ton) GetInboundTransactions(ctx context.Context) ([]*InboundTransacti
 				Amount:   amount,
 			})
 
-			log.Printf("[%s] Jetton %s transaction '%s' processed successful",
-				ton.NetworkCode, jettonInfo.token, txHash)
+			log.Printf("[%s] Jetton (%f %s) raw tx '%s' found",
+				ton.NetworkCode, amount, jettonInfo.token, txHash)
 		}
 	}
 
@@ -695,7 +706,7 @@ func (ton *Ton) GetInboundTransactions(ctx context.Context) ([]*InboundTransacti
 	}
 	log.Printf("[%s] Saved last LT: %d", ton.NetworkCode, account.LastTxLT)
 
-	log.Printf("[%s] Processing finished successfully, found %d user transactions",
+	log.Printf("[%s] Searching finished successfully, found [%d] user raw txs",
 		ton.NetworkCode, len(inboundTxList))
 	return inboundTxList, nil
 }

@@ -185,9 +185,6 @@ func ProcessInboundTransactions(
 				if err != nil {
 					log.Printf("[ProcessInboundTransactions] [%s] Failed to push tx '%s' to Redis: %v",
 						network, tx.TxId, err)
-				} else {
-					log.Printf("[ProcessInboundTransactions] [%s] Tx '%s' successfully processed",
-						network, tx.TxId)
 				}
 
 				// Register refill action in DB
@@ -206,6 +203,9 @@ func ProcessInboundTransactions(
 					log.Printf("[ProcessInboundTransactions] [%s] Failed to create refill action for user %d: %v",
 						network, tx.UserId, err)
 				}
+
+				log.Printf("[ProcessInboundTransactions] [%s] %f %s user transaction successfully processed",
+					network, tx.Amount, tx.Currency)
 			}
 		}()
 	}
@@ -254,7 +254,7 @@ func TransferTokensToMasterWallet(
 		transferFeeAmount, masterFeeAmount float64
 	)
 
-	// If network is not ton
+	//  If it's not TON network
 	if network != GetTon().GetCode() {
 		// Calc needed fee amount (in native network token) for sending tokens from user to Bybit wallet
 		retryErr = retrier.Do(
@@ -331,27 +331,33 @@ func TransferTokensToMasterWallet(
 		func() error {
 			var err error
 
-			if network != GetTon().GetCode() {
-				// If currency = nativeToken, subtract commission from amount
-				if currency != networkCfg.NativeToken && transferFeeAmount > 0 {
-					amount = amount - transferFeeAmount
-				}
+			// If currency = nativeToken, subtract commission from amount
+			if currency != networkCfg.NativeToken && transferFeeAmount > 0 {
+				amount = amount - transferFeeAmount
+			}
 
+			// If it's not TON network
+			if network != GetTon().GetCode() {
 				// Send transaction (user→Bybit) for all networks, excluding ton
 				hash, err = chainService.SendTransaction("user", &userId, currency, networkCfg.BybitAddress, amount, "")
 				if err != nil {
 					return fmt.Errorf("failed to send tokens from user to Bybit: %w", err)
 				}
 
+				log.Printf("%s token transferred from user %d to master, hash: '%s'", currency, userId, hash)
+
 			} else {
-				// Send transaction (master→Bybit) for ton
-				hash, err = chainService.SendTransaction("master", nil, currency, networkCfg.BybitAddress, amount, "")
-				if err != nil {
-					return fmt.Errorf("failed to send tokens from master to Bybit: %w", err)
+				// Send transaction (master→Bybit) for ton (no needed transfer for UMBRELLA jetton)
+				if currency != "UMBRELLA" {
+					hash, err = chainService.SendTransaction("master", nil, currency, networkCfg.BybitAddress, amount, "")
+					if err != nil {
+						return fmt.Errorf("failed to send tokens from master to Bybit: %w", err)
+					}
+
+					log.Printf("%s token transferred from user %d to master, hash: '%s'", currency, userId, hash)
 				}
 			}
 
-			log.Printf("%s token transfer from user %d to master, hash: '%s'", currency, userId, hash)
 			return nil
 		},
 	)

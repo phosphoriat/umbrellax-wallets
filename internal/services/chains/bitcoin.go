@@ -563,7 +563,7 @@ func (btc *Bitcoin) GetInboundTransactions(ctx context.Context) ([]*InboundTrans
 				return
 			}
 
-			log.Printf("[%s] Processing block %d with %d raw transactions",
+			log.Printf("[%s] Processing block %d with %d raw txs",
 				btc.NetworkCode, blockHeight, len(block.Transactions))
 
 			// Local goroutine tx list
@@ -687,7 +687,7 @@ func (btc *Bitcoin) GetInboundTransactions(ctx context.Context) ([]*InboundTrans
 		}
 	}
 
-	log.Printf("[%s] Processing finished successfully: processed %d blocks, found %d user transactions",
+	log.Printf("[%s] Searching finished successfully: processed %d blocks, found %d user raw txs",
 		btc.NetworkCode, lastContinuousBlock-lastBlockHeight, len(txList))
 	return txList, nil
 }

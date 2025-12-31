@@ -117,6 +117,9 @@ var TokenSettings = map[string]map[string]TokenConfig{
 		"USDT": {
 			Decimals: 6,
 		},
+		"UMBRELLA": {
+			Decimals: 15,
+		},
 	},
 	"bitcoin": {
 		"BTC": {
