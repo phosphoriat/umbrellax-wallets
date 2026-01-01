@@ -85,7 +85,7 @@ func newBitcoin() *Bitcoin {
 			NativeToken: nativeToken,
 		},
 		Client:      client,
-		RateLimit:   cfg.QuickNodeRps,
+		RateLimit:   100, // 100 RPS for local node
 		ChainParams: &chaincfg.MainNetParams,
 	}
 }

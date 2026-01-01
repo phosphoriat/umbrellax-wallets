@@ -97,7 +97,7 @@ func newTon() *Ton {
 			NativeToken: nativeToken,
 		},
 		Client:        apiClient,
-		RateLimit:     10, // 10 for TonConsole
+		RateLimit:     100, // 100 RPS for local node
 		WalletVersion: wallet.V4R2,
 		jettonCache:   make(map[string]*JettonInfo),
 	}
