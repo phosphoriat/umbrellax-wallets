@@ -1,9 +1,18 @@
 package validation
 
 import (
+	"regexp"
 	"strings"
 
 	"github.com/go-playground/validator/v10"
+)
+
+var (
+	ethAddressRegex     = regexp.MustCompile(`^0x[a-fA-F0-9]{40}$`)
+	tonAddressRegex     = regexp.MustCompile(`^(EQ|UQ)[a-zA-Z0-9_-]{46}$|^-?[0-9]+:[a-fA-F0-9]{64}$`)
+	solanaAddressRegex  = regexp.MustCompile(`^[1-9A-HJ-NP-Za-km-z]{32,44}$`)
+	bitcoinAddressRegex = regexp.MustCompile(`^(1|3)[a-km-zA-HJ-NP-Z1-9]{25,34}$|^bc1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{39,59}$`)
+	tronAddressRegex    = regexp.MustCompile(`^T[a-zA-Z0-9]{33}$`)
 )
 
 // AddressValidator Validation rule for address
@@ -16,25 +25,23 @@ func AddressValidator(fl validator.FieldLevel) bool {
 	if !networkField.IsValid() {
 		return false
 	}
-	network := networkField.String()
+	network := strings.ToLower(networkField.String())
 
 	switch network {
 	case "ethereum", "bsc":
-		return strings.HasPrefix(addr, "0x") && len(addr) == 42
+		return ethAddressRegex.MatchString(addr)
 
 	case "tron":
-		return strings.HasPrefix(addr, "T") && len(addr) == 34
+		return tronAddressRegex.MatchString(addr)
 
 	case "bitcoin":
-		return strings.HasPrefix(addr, "1") ||
-			strings.HasPrefix(addr, "3") ||
-			strings.HasPrefix(addr, "bc1")
+		return bitcoinAddressRegex.MatchString(addr)
 
 	case "solana":
-		return len(addr) == 44
+		return solanaAddressRegex.MatchString(addr)
 
 	case "ton":
-		return strings.HasPrefix(addr, "UQ") && len(addr) > 30
+		return tonAddressRegex.MatchString(addr)
 
 	default:
 		return false

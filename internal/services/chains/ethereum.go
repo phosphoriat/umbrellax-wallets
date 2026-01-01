@@ -268,7 +268,7 @@ func (eth *Ethereum) GetTransactionCommission(oType, wType string, wId *uint32, 
 // GetTransactionStatus Get transaction status by hash
 // hash: Transaction hash
 // Returns: Transaction status (success/pending/failed)
-func (eth *Ethereum) GetTransactionStatus(hash, toAddr string) (string, error) {
+func (eth *Ethereum) GetTransactionStatus(hash, fromAddr string) (string, error) {
 	_, isPending, err := eth.Client.TransactionByHash(context.Background(), common.HexToHash(hash))
 	if err != nil {
 		return "", fmt.Errorf("failed to get transaction %s: %w", hash, err)

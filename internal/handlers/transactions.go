@@ -25,7 +25,7 @@ type (
 	GetTransactionStatusQuery struct {
 		Network string `validate:"required,network"`
 		Hash    string `validate:"required"`
-		To      string `validate:"address"`
+		From    string `validate:"omitempty,address"`
 	}
 	// SendTransactionQuery validation rules
 	SendTransactionQuery struct {
@@ -65,18 +65,18 @@ func (h *TransactionsHandler) GetTransactionCommission(c *fiber.Ctx) error {
 }
 
 // GetTransactionStatus
-// GET /api/transactions/status?network={network}&hash={hash}
+// GET /api/transactions/status?network={network}&hash={hash}&from={from}
 func (h *TransactionsHandler) GetTransactionStatus(c *fiber.Ctx) error {
 	params := &GetTransactionStatusQuery{
 		Network: c.Query("network"),
 		Hash:    c.Query("hash"),
-		To:      c.Query("to", ""),
+		From:    c.Query("from", ""),
 	}
 	if err := middleware.ValidateStruct(params); err != nil {
 		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{"error": err.Error()})
 	}
 
-	res, err := h.service.GetTransactionStatus(params.Network, params.Hash, params.To)
+	res, err := h.service.GetTransactionStatus(params.Network, params.Hash, params.From)
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}

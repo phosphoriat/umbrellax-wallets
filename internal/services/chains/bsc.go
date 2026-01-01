@@ -267,7 +267,7 @@ func (bsc *Bsc) GetTransactionCommission(oType, wType string, wId *uint32, curre
 // GetTransactionStatus Get transaction status by hash
 // hash: Transaction hash
 // Returns: Transaction status (success/pending/failed)
-func (bsc *Bsc) GetTransactionStatus(hash, toAddr string) (string, error) {
+func (bsc *Bsc) GetTransactionStatus(hash, fromAddr string) (string, error) {
 	_, isPending, err := bsc.Client.TransactionByHash(context.Background(), common.HexToHash(hash))
 	if err != nil {
 		return "", fmt.Errorf("failed to get transaction %s: %w", hash, err)

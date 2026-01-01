@@ -256,7 +256,7 @@ func (sol *Solana) GetTransactionCommission(oType, wType string, wId *uint32, cu
 // GetTransactionStatus Get transaction status by hash
 // hash: Transaction hash
 // Returns: Transaction status (success/pending/failed)
-func (sol *Solana) GetTransactionStatus(hash, toAddr string) (string, error) {
+func (sol *Solana) GetTransactionStatus(hash, fromAddr string) (string, error) {
 	ctx := context.Background()
 
 	// Parse signature from hash

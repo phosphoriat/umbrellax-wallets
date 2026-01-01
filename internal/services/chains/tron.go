@@ -279,7 +279,7 @@ func (tron *Tron) GetTransactionCommission(oType, wType string, wId *uint32, cur
 // GetTransactionStatus Get transaction status by hash
 // hash: Transaction hash
 // Returns: Transaction status (success/pending/failed)
-func (tron *Tron) GetTransactionStatus(hash, toAddr string) (string, error) {
+func (tron *Tron) GetTransactionStatus(hash, fromAddr string) (string, error) {
 	tx, err := tron.Client.GetTransactionByID(hash)
 	if err != nil {
 		return "", fmt.Errorf("failed to get transaction %s: %w", hash, err)
@@ -290,7 +290,7 @@ func (tron *Tron) GetTransactionStatus(hash, toAddr string) (string, error) {
 	}
 
 	status := tx.Ret[0].ContractRet.String()
-	return status, nil
+	return strings.ToLower(status), nil
 }
 
 // SendTransaction Send transaction to the network

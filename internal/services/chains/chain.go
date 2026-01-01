@@ -62,7 +62,7 @@ type (
 		GetUserWalletBalance(userId uint32, currency string) (float64, error)
 		GetMasterWallet() (map[string]any, error)
 		GetTransactionCommission(oType, wType string, wId *uint32, currency, to string, amount float64, memo string) (map[string]float64, error)
-		GetTransactionStatus(hash, toAddr string) (string, error)
+		GetTransactionStatus(hash, fromAddr string) (string, error)
 		SendTransaction(wType string, wId *uint32, currency, to string, amount float64, memo string) (string, error)
 		GetInboundTransactions(ctx context.Context) ([]*InboundTransaction, error)
 	}

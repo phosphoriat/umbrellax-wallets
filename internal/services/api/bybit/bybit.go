@@ -58,9 +58,10 @@ func newHTTPClient() *HTTPClient {
 }
 
 // GetCoinInfo Get coin info for network
+// @docs https://bybit-exchange.github.io/docs/v5/asset/coin-info
 // coin: Currency ticker
 // network: Network code
-// @docs https://bybit-exchange.github.io/docs/v5/asset/coin-info
+// Returns: Coin info map
 func (c *HTTPClient) GetCoinInfo(ctx context.Context, coin, network string) (map[string]any, error) {
 	// Convert network to Bybit format
 	bybitNetwork, ok := networkToBybit[network]
@@ -79,10 +80,8 @@ func (c *HTTPClient) GetCoinInfo(ctx context.Context, coin, network string) (map
 	}
 
 	coinValue, _ := utils.DataGet(rowData, "coin")
-	nameValue, _ := utils.DataGet(rowData, "name")
 	result := map[string]any{
-		"coin": coinValue,
-		"name": nameValue,
+		"currency": coinValue,
 	}
 
 	chains, ok := utils.DataGet(rowData, "chains")
@@ -104,10 +103,11 @@ func (c *HTTPClient) GetCoinInfo(ctx context.Context, coin, network string) (map
 }
 
 // GetDepositAddress Get deposit wallet address
-// @note Unused
+// @docs https://bybit-exchange.github.io/docs/v5/asset/deposit/master-deposit-addr
+// @note Unused method
 // coin: Currency ticker
 // network: Network code
-// @docs https://bybit-exchange.github.io/docs/v5/asset/deposit/master-deposit-addr
+// Returns: Deposit address
 func (c *HTTPClient) GetDepositAddress(ctx context.Context, coin, network string) (string, error) {
 	// Convert network to Bybit format
 	bybitNetwork, ok := networkToBybit[network]
@@ -141,10 +141,11 @@ func (c *HTTPClient) GetDepositAddress(ctx context.Context, coin, network string
 }
 
 // GetWalletBalance Get wallet balance
-// @note Unused
+// @docs https://bybit-exchange.github.io/docs/v5/account/wallet-balance
+// @note Unused method
 // coin: Currency ticker
 // accountType: Account type (FUND, UNIFIED)
-// @docs https://bybit-exchange.github.io/docs/v5/account/wallet-balance
+// Returns: Wallet balance
 func (c *HTTPClient) GetWalletBalance(ctx context.Context, coin, accountType string) (float64, error) {
 	resultMap, err := c.sendRequest(ctx, map[string]any{
 		"coin":        coin,
@@ -171,8 +172,10 @@ func (c *HTTPClient) GetWalletBalance(ctx context.Context, coin, accountType str
 }
 
 // GetWithdrawalFee Get withdrawal fee for coin in network (in coin value)
+// @note Uses GetCoinInfo method and parse it's result
 // coin: Currency ticker
 // network: Network code
+// Returns: Withdrawal fee
 func (c *HTTPClient) GetWithdrawalFee(ctx context.Context, coin, network string) (float64, error) {
 	result, err := c.GetCoinInfo(ctx, coin, network)
 	if err != nil {
@@ -191,8 +194,9 @@ func (c *HTTPClient) GetWithdrawalFee(ctx context.Context, coin, network string)
 }
 
 // GetWithdrawalRecords Get withdrawal records
-// params: Params data
 // @docs https://bybit-exchange.github.io/docs/v5/asset/withdraw/withdraw-record
+// params: Params data
+// Returns: Slice of withdrawal records
 func (c *HTTPClient) GetWithdrawalRecords(ctx context.Context, params map[string]any) ([]any, error) {
 	resultMap, err := c.sendRequest(ctx, params, "GetWithdrawalRecords")
 	if err != nil {
@@ -209,10 +213,11 @@ func (c *HTTPClient) GetWithdrawalRecords(ctx context.Context, params map[string
 
 // CreateWithdraw Create new withdraw from bybit to master wallet and return bybit withdraw id
 // Withdrawals can be only from FUND account type
+// @docs https://bybit-exchange.github.io/docs/v5/asset/withdraw
 // coin: Currency ticker
 // chain: Network code
 // amount: Withdraw amount value
-// @docs https://bybit-exchange.github.io/docs/v5/asset/withdraw
+// Returns: Bybit withdraw ID
 func (c *HTTPClient) CreateWithdraw(ctx context.Context, coin, chain string, amount float64) (string, error) {
 	// Convert network to Bybit format
 	bybitChain, ok := networkToBybit[chain]
@@ -264,11 +269,12 @@ func (c *HTTPClient) CreateWithdraw(ctx context.Context, coin, chain string, amo
 }
 
 // @private createInternalTransfer Create internal account transfer (f.e. from UNIFIED to FUND)
+// @docs https://bybit-exchange.github.io/docs/v5/asset/transfer/create-inter-transfer
 // coin: Currency ticker
 // network: Network code
 // fromAccountType: Account type (FUND, UNIFIED)
 // toAccountType: Account type (UNIFIED, FUND)
-// @docs https://bybit-exchange.github.io/docs/v5/asset/transfer/create-inter-transfer
+// Returns: Bybit transfer ID
 func (c *HTTPClient) createInternalTransfer(ctx context.Context, coin, amount, fromAccountType, toAccountType string) (int, error) {
 	resultMap, err := c.sendRequest(ctx, map[string]any{
 		"transferId":      uuid.NewString(),
@@ -291,10 +297,10 @@ func (c *HTTPClient) createInternalTransfer(ctx context.Context, coin, amount, f
 	return 0, fmt.Errorf("[Bybit API] CreateInternalTransfer: Invalid response format")
 }
 
-// @private getMinWithdrawalAmount
-// Get min withdrawal amount for coin in network
+// @private getMinWithdrawalAmount Get min withdrawal amount for coin in network
 // coin: Currency ticker
 // network: Network code
+// Returns: Minimal withdrawal amount
 func (c *HTTPClient) getMinWithdrawalAmount(ctx context.Context, coin, network string) (float64, error) {
 	result, err := c.GetCoinInfo(ctx, coin, network)
 	if err != nil {
@@ -312,10 +318,10 @@ func (c *HTTPClient) getMinWithdrawalAmount(ctx context.Context, coin, network s
 		coin, network)
 }
 
-// @private sendRequest
-// Send request to Bybit API and return response result or error
+// @private sendRequest Send request to Bybit API and return response result or error
 // params: Params data
 // methodName: Called request method name
+// Returns: Request response entity
 func (c *HTTPClient) sendRequest(ctx context.Context, params map[string]any, methodName string) (map[string]any, error) {
 	// Create new request entity
 	reqClient := c.bybit.NewUtaBybitServiceWithParams(params)

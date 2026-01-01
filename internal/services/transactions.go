@@ -32,14 +32,14 @@ func (s *TransactionsService) GetTransactionCommission(network, currency, to str
 }
 
 // GetTransactionStatus Get transaction status by hash
-func (s *TransactionsService) GetTransactionStatus(network, hash, toAddr string) (string, error) {
+func (s *TransactionsService) GetTransactionStatus(network, hash, fromAddr string) (string, error) {
 	// Get chain service instance from registry
 	chainService, err := chains.GetChainService(network)
 	if err != nil {
 		return "", err
 	}
 
-	status, err := chainService.GetTransactionStatus(hash, toAddr)
+	status, err := chainService.GetTransactionStatus(hash, fromAddr)
 	if err != nil {
 		return "", err
 	}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -72,15 +73,12 @@ func newTon() *Ton {
 	client := liteclient.NewConnectionPool()
 
 	// Add liteservers from config to pool
-	content, err := os.ReadFile(cfg.TonConfig)
-	if err != nil {
-		log.Fatalf("[Ton] Failed to read liteserver config: %v", err)
-	}
+	content, _ := os.ReadFile(cfg.TonConfig)
 	var tonConfig liteclient.GlobalConfig
 	if err := json.Unmarshal(content, &tonConfig); err != nil {
-		log.Fatalf("[Ton] Failed to parse liteserver config: %v", err)
+		log.Fatalf("[Ton] Failed to read liteserver config: %v", err)
 	}
-	err = client.AddConnectionsFromConfig(context.Background(), &tonConfig)
+	err := client.AddConnectionsFromConfig(context.Background(), &tonConfig)
 	if err != nil {
 		log.Fatalf("[Ton] Failed to connect: %v", err)
 	}
@@ -99,7 +97,7 @@ func newTon() *Ton {
 			NativeToken: nativeToken,
 		},
 		Client:        apiClient,
-		RateLimit:     10, // 10 for TonConsole 
+		RateLimit:     10, // 10 for TonConsole
 		WalletVersion: wallet.V4R2,
 		jettonCache:   make(map[string]*JettonInfo),
 	}
@@ -266,22 +264,30 @@ func (ton *Ton) GetTransactionCommission(oType, wType string, wId *uint32, curre
 
 // GetTransactionStatus Get transaction status by hash
 // hash: Transaction hash
-// toAddr: Recipient wallet address (required)
+// fromAddr: Sender wallet address (required)
 // Returns: Transaction status (success/pending)
-func (ton *Ton) GetTransactionStatus(hash, toAddr string) (string, error) {
-	if toAddr == "" {
-		return "", fmt.Errorf("to address is required")
+func (ton *Ton) GetTransactionStatus(hash, fromAddr string) (string, error) {
+	if fromAddr == "" {
+		return "", fmt.Errorf("sender address is required")
 	}
 
 	ctx := context.Background()
 
-	// Parse to address
-	to, err := address.ParseAddr(toAddr)
+	// Parse from address
+	from, err := address.ParseAddr(fromAddr)
 	if err != nil {
-		return "", fmt.Errorf("invalid recipient address: %w", err)
+		return "", fmt.Errorf("invalid sender address: %w", err)
 	}
+
 	// Decode hash for comparison
-	hashBytes, err := base64.StdEncoding.DecodeString(hash)
+	var hashBytes []byte
+	if len(hash) == 64 {
+		// Hex format (64 chars = 32 bytes)
+		hashBytes, err = hex.DecodeString(hash)
+	} else {
+		// Base64 format
+		hashBytes, err = base64.StdEncoding.DecodeString(hash)
+	}
 	if err != nil {
 		return "", fmt.Errorf("invalid transaction hash: %w", err)
 	}
@@ -292,10 +298,15 @@ func (ton *Ton) GetTransactionStatus(hash, toAddr string) (string, error) {
 		return "", fmt.Errorf("failed to get masterchain info: %w", err)
 	}
 
-	// Get account info
-	account, err := ton.Client.GetAccount(ctx, chainInfo, to)
+	// Get account info for sender address
+	account, err := ton.Client.GetAccount(ctx, chainInfo, from)
 	if err != nil {
 		return "", fmt.Errorf("failed to get account info: %w", err)
+	}
+
+	// Check, if account has any transactions
+	if account.LastTxLT == 0 {
+		return "pending", nil
 	}
 
 	// Init pagination params from account's last transaction
@@ -305,7 +316,7 @@ func (ton *Ton) GetTransactionStatus(hash, toAddr string) (string, error) {
 	// Iterate transaction history (max 100 iterations)
 	for i := 0; i < 100; i++ {
 		// Get transaction batch (20 transaction per request)
-		txs, err := ton.Client.ListTransactions(ctx, to, 20, lt, txHash)
+		txs, err := ton.Client.ListTransactions(ctx, from, 20, lt, txHash)
 		if err != nil {
 			return "", fmt.Errorf("failed to list transactions: %w", err)
 		}
@@ -322,15 +333,15 @@ func (ton *Ton) GetTransactionStatus(hash, toAddr string) (string, error) {
 			}
 		}
 
-		// Get the oldest transaction for next iteration
+		// Get the oldest transaction in batch (first element)
 		oldest := txs[0]
-		// Check for end of history (no progress) - transaction not found
-		if oldest.LT == lt && bytes.Equal(oldest.Hash, txHash) {
+		// Check for end of history - no previous transaction
+		if oldest.PrevTxLT == 0 {
 			return "pending", nil
 		}
 
-		// Update pagination params
-		lt, txHash = oldest.LT, oldest.Hash
+		// Update pagination params to get older transactions
+		lt, txHash = oldest.PrevTxLT, oldest.PrevTxHash
 	}
 
 	// Max iterations reached - assuming still pending

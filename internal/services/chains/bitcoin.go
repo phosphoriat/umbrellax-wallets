@@ -277,7 +277,7 @@ func (btc *Bitcoin) GetTransactionCommission(oType, wType string, wId *uint32, c
 // GetTransactionStatus Get transaction status by hash
 // hash: Transaction hash
 // Returns: Transaction status (success/pending/failed)
-func (btc *Bitcoin) GetTransactionStatus(hash, toAddr string) (string, error) {
+func (btc *Bitcoin) GetTransactionStatus(hash, fromAddr string) (string, error) {
 	// Parse transaction hash
 	txHash, err := chainhash.NewHashFromStr(hash)
 	if err != nil {
