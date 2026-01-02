@@ -25,8 +25,7 @@ func NewRefillsTask() *RefillsTask {
 
 func (t *RefillsTask) Execute(ctx context.Context) error {
 	// Init repositories
-	walletRepo := repository.NewWalletRepository()
 	actionRepo := repository.NewActionRepository()
 
-	return chains.ProcessInboundTransactions(ctx, walletRepo, actionRepo)
+	return chains.ProcessInboundTransactions(ctx, actionRepo)
 }

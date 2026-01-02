@@ -453,6 +453,7 @@ func (btc *Bitcoin) SendTransaction(wType string, wId *uint32, currency, to stri
 }
 
 // GetInboundTransactions Get new inbound transactions list
+// ctx: Current process context
 // Returns: Inbound transactions list
 func (btc *Bitcoin) GetInboundTransactions(ctx context.Context) ([]*InboundTransaction, error) {
 	// Create rate limiter

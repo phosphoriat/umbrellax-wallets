@@ -319,6 +319,7 @@ func (eth *Ethereum) SendTransaction(wType string, wId *uint32, currency, toAddr
 }
 
 // GetInboundTransactions Get new inbound transactions list
+// ctx: Current process context
 // Returns: Inbound transactions list
 func (eth *Ethereum) GetInboundTransactions(ctx context.Context) ([]*InboundTransaction, error) {
 	// Create rate limiter

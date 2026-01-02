@@ -328,6 +328,7 @@ func (sol *Solana) SendTransaction(wType string, wId *uint32, currency, toAddr s
 }
 
 // GetInboundTransactions Get new inbound transactions list
+// ctx: Current process context
 // Returns: Inbound transactions list
 func (sol *Solana) GetInboundTransactions(ctx context.Context) ([]*InboundTransaction, error) {
 	// Create rate limiter

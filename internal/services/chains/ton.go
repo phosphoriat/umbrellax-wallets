@@ -30,6 +30,7 @@ import (
 	"github.com/xssnick/tonutils-go/ton/jetton"
 	"github.com/xssnick/tonutils-go/ton/wallet"
 	"github.com/xssnick/tonutils-go/tvm/cell"
+	"golang.org/x/sync/semaphore"
 	"golang.org/x/time/rate"
 )
 
@@ -392,6 +393,7 @@ func (ton *Ton) SendTransaction(wType string, wId *uint32, currency, toAddr stri
 }
 
 // GetInboundTransactions Get new inbound transactions list
+// ctx: Current process context
 // Returns: Inbound transactions list
 func (ton *Ton) GetInboundTransactions(ctx context.Context) ([]*InboundTransaction, error) {
 	// Create rate limiter
@@ -437,12 +439,12 @@ func (ton *Ton) GetInboundTransactions(ctx context.Context) ([]*InboundTransacti
 		return nil, fmt.Errorf("[%s] Failed to get account: %w", ton.NetworkCode, err)
 	}
 
-	// No transactions on account yet
+	// Check, if no transactions on account yet
 	if account.LastTxLT == 0 {
 		return []*InboundTransaction{}, nil
 	}
 
-	// No new transactions since last check
+	// Check, if no new transactions since last check
 	if account.LastTxLT <= lastProcessedLT {
 		log.Printf("[%s] No new raw txs to search (lastLT: %d, accountLT: %d)",
 			ton.NetworkCode, lastProcessedLT, account.LastTxLT)
@@ -454,7 +456,7 @@ func (ton *Ton) GetInboundTransactions(ctx context.Context) ([]*InboundTransacti
 	currentLT := account.LastTxLT
 	currentHash := account.LastTxHash
 
-	// Paginate backwards until we reach lastProcessedLT
+	// Paginate backwards until we reach lastProcessedLT (synchronously)
 	for currentLT > lastProcessedLT {
 		// Get transactions list for master address (up to 100 transactions)
 		if err := limiter.Wait(ctx); err != nil {
@@ -500,215 +502,254 @@ func (ton *Ton) GetInboundTransactions(ctx context.Context) ([]*InboundTransacti
 	log.Printf("[%s] Start searching %d new raw txs from LT %d to %d",
 		ton.NetworkCode, len(allNewTxs), lastProcessedLT, account.LastTxLT)
 
-	// Processed inbound transactions result list
-	inboundTxList := make([]*InboundTransaction, 0)
+	var (
+		// Wait group to wait for all tx blocks goroutines to complete
+		wg sync.WaitGroup
+		mu sync.Mutex
+		// Semaphore for goroutines limit
+		sem = semaphore.NewWeighted(20)
+		// Processed inbound transactions result list
+		txList []*InboundTransaction
+		// Goroutines cancellation context
+		cancelCtx, cancel = context.WithCancel(ctx)
+	)
+	defer cancel()
 
-	// Process transactions
+	// Process found transactions (in separate goroutines)
 	for _, tx := range allNewTxs {
-		// Process only incoming internal messages
-		if tx.IO.In == nil || tx.IO.In.MsgType != tlb.MsgTypeInternal {
-			continue
-		}
+		wg.Add(1)
 
-		// Safely convert message to InternalMessage
-		intMsg := tx.IO.In.AsInternal()
-		// Get transaction hash
-		txHash := fmt.Sprintf("%x", tx.Hash)
+		go func() {
+			defer wg.Done()
 
-		// Skip transaction, if message body is empty
-		if intMsg.Body == nil {
-			continue
-		}
+			// Check context cancellation
+			if cancelCtx.Err() != nil {
+				return
+			}
 
-		// Parse message body once
-		slice := intMsg.Body.BeginParse()
-		// Check if at least 32 bits for op code
-		if slice.BitsLeft() < 32 {
-			continue
-		}
-		// Get op code
-		opCode, err := slice.LoadUInt(32)
-		if err != nil {
-			continue
-		}
+			// Parallel execution limit
+			if err := sem.Acquire(cancelCtx, 1); err != nil {
+				return
+			}
+			defer sem.Release(1)
 
-		switch opCode {
-		// If it's a native TON transfer
-		case 0x00000000:
-			// Extract comment
-			comment, err := slice.LoadStringSnake()
+			// Process only incoming internal messages
+			if tx.IO.In == nil || tx.IO.In.MsgType != tlb.MsgTypeInternal {
+				return
+			}
+
+			// Safely convert message to InternalMessage
+			intMsg := tx.IO.In.AsInternal()
+			// Get transaction hash
+			txHash := fmt.Sprintf("%x", tx.Hash)
+
+			// Skip transaction, if message body is empty
+			if intMsg.Body == nil {
+				return
+			}
+
+			// Parse message body once
+			slice := intMsg.Body.BeginParse()
+			// Check if at least 32 bits for op code
+			if slice.BitsLeft() < 32 {
+				return
+			}
+			// Get op code
+			opCode, err := slice.LoadUInt(32)
 			if err != nil {
-				continue
-			}
-			comment = strings.TrimSpace(comment)
-			if comment == "" {
-				continue
+				return
 			}
 
-			// Get user id by comment (memo)
-			userId, err := ton.UserRepo.GetUserIdByNumber(comment)
-			if err != nil {
-				log.Printf("[%s] Failed to get user id by memo '%s' in tx '%s': %v",
-					ton.NetworkCode, comment, txHash, err)
-				continue
-			}
+			switch opCode {
+			// If it's a native TON transfer
+			case 0x00000000:
+				// Extract comment
+				comment, err := slice.LoadStringSnake()
+				if err != nil {
+					return
+				}
+				comment = strings.TrimSpace(comment)
+				if comment == "" {
+					return
+				}
 
-			// Check amount
-			if intMsg.Amount.Nano().Uint64() == 0 {
-				continue
-			}
+				// Get user id by comment (memo)
+				userId, err := ton.UserRepo.GetUserIdByNumber(comment)
+				if err != nil {
+					log.Printf("[%s] Failed to get user id by memo '%s' in tx '%s': %v",
+						ton.NetworkCode, comment, txHash, err)
+					return
+				}
 
-			// Get from address
-			fromAddr := intMsg.SrcAddr.String()
-			// Get converted amount (in TON)
-			amount := utils.RemoveDecimals(intMsg.Amount.Nano(), int64(tonDecimals))
+				// Check amount
+				if intMsg.Amount.Nano().Uint64() == 0 {
+					return
+				}
 
-			inboundTxList = append(inboundTxList, &InboundTransaction{
-				UserId:   userId,
-				Currency: "TON",
-				TxId:     txHash,
-				From:     fromAddr,
-				To:       masterAddr.String(),
-				Amount:   amount,
-			})
+				// Get from address
+				fromAddr := intMsg.SrcAddr.String()
+				// Get converted amount (in TON)
+				amount := utils.RemoveDecimals(intMsg.Amount.Nano(), int64(tonDecimals))
 
-			log.Printf("[%s] %f TON raw tx '%s' found", ton.NetworkCode, amount, txHash)
+				// Add result to slice
+				mu.Lock()
+				txList = append(txList, &InboundTransaction{
+					UserId:   userId,
+					Currency: "TON",
+					TxId:     txHash,
+					From:     fromAddr,
+					To:       masterAddr.String(),
+					Amount:   amount,
+				})
+				mu.Unlock()
 
-		// If it's a Jetton transfer (0x7362d09c - internal_transfer to wallet)
-		case 0x7362d09c:
-			// Skip query_id (64 bits)
-			if slice.BitsLeft() < 64 {
-				continue
-			}
-			_, err = slice.LoadUInt(64)
-			if err != nil {
-				continue
-			}
+				log.Printf("[%s] %f TON raw tx '%s' found", ton.NetworkCode, amount, txHash)
 
-			// Read jetton amount
-			jettonAmount, err := slice.LoadBigCoins()
-			if err != nil {
-				continue
-			}
+			// If it's a Jetton transfer (0x7362d09c - internal_transfer to wallet)
+			case 0x7362d09c:
+				// Skip query_id (64 bits)
+				if slice.BitsLeft() < 64 {
+					return
+				}
+				_, err = slice.LoadUInt(64)
+				if err != nil {
+					return
+				}
 
-			// Read sender address
-			jettonSender, err := slice.LoadAddr()
-			if err != nil {
-				continue
-			}
+				// Read jetton amount
+				jettonAmount, err := slice.LoadBigCoins()
+				if err != nil {
+					return
+				}
 
-			// Read forward payload for comment
-			// Skip response_destination
-			_, _ = slice.LoadAddr()
-			// Skip custom_payload flag
-			if slice.BitsLeft() > 0 {
-				_, _ = slice.LoadUInt(1)
-			}
-			// Try to read forward_ton_amount
-			_, _ = slice.LoadBigCoins()
+				// Read sender address
+				jettonSender, err := slice.LoadAddr()
+				if err != nil {
+					return
+				}
 
-			// Try to read comment from forward_payload
-			var comment string
-			if slice.RefsNum() > 0 {
-				ref, err := slice.LoadRef()
-				if err == nil {
-					if ref.BitsLeft() >= 32 {
-						op, _ := ref.LoadUInt(32)
-						if op == 0 {
-							comment, _ = ref.LoadStringSnake()
-							comment = strings.TrimSpace(comment)
+				// Read forward payload for comment
+				// Skip response_destination
+				_, _ = slice.LoadAddr()
+				// Skip custom_payload flag
+				if slice.BitsLeft() > 0 {
+					_, _ = slice.LoadUInt(1)
+				}
+				// Try to read forward_ton_amount
+				_, _ = slice.LoadBigCoins()
+
+				// Try to read comment from forward_payload
+				var comment string
+				if slice.RefsNum() > 0 {
+					ref, err := slice.LoadRef()
+					if err == nil {
+						if ref.BitsLeft() >= 32 {
+							op, _ := ref.LoadUInt(32)
+							if op == 0 {
+								comment, _ = ref.LoadStringSnake()
+								comment = strings.TrimSpace(comment)
+							}
 						}
 					}
 				}
-			}
-			// Check, if transaction has comment
-			if comment == "" {
-				log.Printf("[%s] Jetton tx '%s' has no comment", ton.NetworkCode, txHash)
-				continue
-			}
-
-			// Get user by comment (memo)
-			userId, err := ton.UserRepo.GetUserIdByNumber(comment)
-			if err != nil {
-				log.Printf("[%s] Failed to get user by memo '%s': %v", ton.NetworkCode, comment, err)
-				continue
-			}
-
-			// Get jetton wallet address (message sender is jetton wallet)
-			jettonWalletAddr := intMsg.SrcAddr.String()
-
-			// Trying to get jetton info from cache
-			ton.jettonCacheMu.RLock()
-			jettonInfo, exists := ton.jettonCache[jettonWalletAddr]
-			ton.jettonCacheMu.RUnlock()
-			// Fetch from contract
-			if !exists {
-				if err := limiter.Wait(ctx); err != nil {
-					return nil, err
+				// Check, if transaction has comment
+				if comment == "" {
+					log.Printf("[%s] Jetton tx '%s' has no comment", ton.NetworkCode, txHash)
+					return
 				}
 
-				// Get current masterchain info
-				master, err := ton.Client.CurrentMasterchainInfo(ctx)
+				// Get user by comment (memo)
+				userId, err := ton.UserRepo.GetUserIdByNumber(comment)
 				if err != nil {
-					log.Printf("[%s] Failed to get current masterchain info: %v", ton.NetworkCode, err)
-					continue
+					log.Printf("[%s] Failed to get user by memo '%s': %v", ton.NetworkCode, comment, err)
+					return
 				}
 
-				// Call get_wallet_data method on jetton wallet
-				// Returns stack: [balance, owner, jetton_master, jetton_wallet_code]
-				result, err := ton.Client.RunGetMethod(ctx, master, intMsg.SrcAddr, "get_wallet_data")
-				if err != nil {
-					log.Printf("[%s] Failed to run get_wallet_data: %v", ton.NetworkCode, err)
-					continue
+				// Get jetton wallet address (message sender is jetton wallet)
+				jettonWalletAddr := intMsg.SrcAddr.String()
+
+				// Trying to get jetton info from cache
+				ton.jettonCacheMu.RLock()
+				jettonInfo, exists := ton.jettonCache[jettonWalletAddr]
+				ton.jettonCacheMu.RUnlock()
+				// Fetch from contract
+				if !exists {
+					if err := limiter.Wait(cancelCtx); err != nil {
+						return
+					}
+
+					// Get current masterchain info
+					master, err := ton.Client.CurrentMasterchainInfo(cancelCtx)
+					if err != nil {
+						log.Printf("[%s] Failed to get current masterchain info: %v", ton.NetworkCode, err)
+						return
+					}
+
+					// Call get_wallet_data method on jetton wallet
+					// Returns stack: [balance, owner, jetton_master, jetton_wallet_code]
+					if err := limiter.Wait(cancelCtx); err != nil {
+						return
+					}
+					result, err := ton.Client.RunGetMethod(cancelCtx, master, intMsg.SrcAddr, "get_wallet_data")
+					if err != nil {
+						log.Printf("[%s] Failed to run get_wallet_data: %v", ton.NetworkCode, err)
+						return
+					}
+
+					// Get jetton master address from stack (index 2)
+					// Stack in TON starts from 0: [0]=balance, [1]=owner, [2]=jetton_master, [3]=code
+					jettonMasterSlice := result.MustSlice(2)
+					jettonMasterAddr, err := jettonMasterSlice.LoadAddr()
+					if err != nil {
+						log.Printf("[%s] Failed to parse jetton master address: %v", ton.NetworkCode, err)
+						return
+					}
+
+					// Get token name by contract address (jetton master address)
+					token, ok := config.GetTokenByContractAddr(ton.NetworkCode, jettonMasterAddr.String())
+					if !ok {
+						log.Printf("[%s] Unknown jetton master address '%s'", ton.NetworkCode, jettonMasterAddr.String())
+						return
+					}
+
+					// Get token decimals from config
+					decimals := config.TokenSettings[ton.NetworkCode][token].Decimals
+
+					jettonInfo = &JettonInfo{
+						masterAddr: jettonMasterAddr,
+						decimals:   int64(decimals),
+						token:      token,
+					}
+
+					// Save jetton info to cache
+					ton.jettonCacheMu.Lock()
+					ton.jettonCache[jettonWalletAddr] = jettonInfo
+					ton.jettonCacheMu.Unlock()
 				}
 
-				// Get jetton master address from stack (index 2)
-				// Stack in TON starts from 0: [0]=balance, [1]=owner, [2]=jetton_master, [3]=code
-				jettonMasterSlice := result.MustSlice(2)
-				jettonMasterAddr, err := jettonMasterSlice.LoadAddr()
-				if err != nil {
-					log.Printf("[%s] Failed to parse jetton master address: %v", ton.NetworkCode, err)
-					continue
-				}
+				// Get converted amount (with removed decimals)
+				amount := utils.RemoveDecimals(jettonAmount, jettonInfo.decimals)
 
-				// Get token name by contract address (jetton master address)
-				token, ok := config.GetTokenByContractAddr(ton.NetworkCode, jettonMasterAddr.String())
-				if !ok {
-					log.Printf("[%s] Unknown jetton master address '%s'", ton.NetworkCode, jettonMasterAddr.String())
-					continue
-				}
+				// Add result to slice
+				mu.Lock()
+				txList = append(txList, &InboundTransaction{
+					UserId:   userId,
+					Currency: jettonInfo.token,
+					TxId:     txHash,
+					From:     jettonSender.String(),
+					To:       masterAddr.String(),
+					Amount:   amount,
+				})
+				mu.Unlock()
 
-				// Get token decimals from config
-				decimals := config.TokenSettings[ton.NetworkCode][token].Decimals
-
-				jettonInfo = &JettonInfo{
-					masterAddr: jettonMasterAddr,
-					decimals:   int64(decimals),
-					token:      token,
-				}
-
-				// Save jetton info to cache
-				ton.jettonCacheMu.Lock()
-				ton.jettonCache[jettonWalletAddr] = jettonInfo
-				ton.jettonCacheMu.Unlock()
+				log.Printf("[%s] Jetton (%f %s) raw tx '%s' found",
+					ton.NetworkCode, amount, jettonInfo.token, txHash)
 			}
-
-			// Get converted amount (with removed decimals)
-			amount := utils.RemoveDecimals(jettonAmount, jettonInfo.decimals)
-
-			inboundTxList = append(inboundTxList, &InboundTransaction{
-				UserId:   userId,
-				Currency: jettonInfo.token,
-				TxId:     txHash,
-				From:     jettonSender.String(),
-				To:       masterAddr.String(),
-				Amount:   amount,
-			})
-
-			log.Printf("[%s] Jetton (%f %s) raw tx '%s' found",
-				ton.NetworkCode, amount, jettonInfo.token, txHash)
-		}
+		}()
 	}
+
+	// Waiting for results
+	wg.Wait()
 
 	// Save max LT (latest transaction LT) as last processed in Redis
 	err = redis.GetClient().HSet(ctx, "last_blocks", ton.NetworkCode, account.LastTxLT)
@@ -718,8 +759,8 @@ func (ton *Ton) GetInboundTransactions(ctx context.Context) ([]*InboundTransacti
 	log.Printf("[%s] Saved last LT: %d", ton.NetworkCode, account.LastTxLT)
 
 	log.Printf("[%s] Searching finished successfully, found [%d] user raw txs",
-		ton.NetworkCode, len(inboundTxList))
-	return inboundTxList, nil
+		ton.NetworkCode, len(txList))
+	return txList, nil
 }
 
 /* GetMasterWallet private methods group */

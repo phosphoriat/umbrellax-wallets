@@ -70,9 +70,8 @@ type (
 
 // ProcessInboundTransactions Process inbound transactions (scheduled every 10 sec)
 // ctx: Process context from scheduler
-func ProcessInboundTransactions(
-	ctx context.Context, walletRepo *repository.WalletRepository, actionRepo *repository.ActionRepository,
-) error {
+// actionRepo: Action repository
+func ProcessInboundTransactions(ctx context.Context, actionRepo *repository.ActionRepository) error {
 	// Load config
 	cfg, _ := config.Load()
 
