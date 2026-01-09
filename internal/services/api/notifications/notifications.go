@@ -117,7 +117,7 @@ func (c *Client) sendMessengerNotification(ctx context.Context, message string) 
 		data, err := json.Marshal(map[string]any{
 			"bot_id":    c.MessengerBotId,
 			"bot_token": c.MessengerBotToken,
-			"message":   message,
+			"text":      message,
 		})
 		if err != nil {
 			return fmt.Errorf("[Messenger API] JSON payload serialize error: %w", err)
@@ -132,6 +132,7 @@ func (c *Client) sendMessengerNotification(ctx context.Context, message string) 
 
 		// Add headers
 		req.Header.Set("Accept", "application/json")
+		req.Header.Set("Content-Type", "application/json")
 
 		// Execute request and get response
 		resp, err := c.httpClient.Do(req)

@@ -44,7 +44,7 @@ func (t *WithdrawRequestTask) Execute(ctx context.Context) error {
 	// Get first item from hash
 	key, value, err := t.redis.GetFirstHashElement(ctx, t.RedisBybitReqsKey)
 	if err != nil {
-		return fmt.Errorf("read hash error '%s': %w", t.RedisBybitReqsKey, err)
+		return fmt.Errorf("[WithdrawRequestTask] Read hash error '%s': %w", t.RedisBybitReqsKey, err)
 	}
 	if key == "" {
 		return nil
@@ -59,7 +59,7 @@ func (t *WithdrawRequestTask) Execute(ctx context.Context) error {
 		})
 		t.redis.HSet(ctx, t.RedisWithdrawalsKey, key, txItem)
 
-		log.Printf("Process item error: %v", err)
+		log.Printf("[WithdrawRequestTask] Process item error: %v", err)
 	}
 
 	// Delete item from bybit requests Redis hash
@@ -75,14 +75,18 @@ func (t *WithdrawRequestTask) processItem(ctx context.Context, requestId, itemSt
 	if err := json.Unmarshal([]byte(itemStr), &item); err != nil {
 		return fmt.Errorf("failed to unmarshal bybit withdrawal tx item: %w", err)
 	}
-	if item.Currency == "" || item.Network == "" || item.To == "" || item.Amount == 0 {
+	if item.Currency == "" || item.Network == "" || item.To == "" || item.Amount <= 0 {
 		return fmt.Errorf("invalid bybit withdrawal tx item data: %+v", item)
 	}
 
-	// Send withdraw from bybit to master wallet
-	bybitId, err := t.bybit.CreateWithdraw(ctx, item.Currency, item.Network, item.Amount)
-	if err != nil {
-		return fmt.Errorf("bybit withdrawal tx error: %w", err)
+	var bybitId string
+	if item.Currency != "UMBRELLA" {
+		// Send withdraw from bybit to master wallet
+		var err error
+		bybitId, err = t.bybit.CreateWithdraw(ctx, item.Currency, item.Network, item.Amount)
+		if err != nil {
+			return fmt.Errorf("bybit withdrawal tx error: %w", err)
+		}
 	}
 
 	// Add item in bybit_withdrawals Redis HASH with success status
@@ -95,5 +99,7 @@ func (t *WithdrawRequestTask) processItem(ctx context.Context, requestId, itemSt
 
 	t.redis.HSet(ctx, t.RedisBybitWithdrawalsKey, requestId, wItem)
 
+	log.Printf("[WithdrawRequestTask] Process item successfully: requestId=%s bybitId=%s itemStr=%s",
+		requestId, bybitId, itemStr)
 	return nil
 }

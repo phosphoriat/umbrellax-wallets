@@ -16,6 +16,7 @@ import (
 	"wallets/internal/database/vault"
 	"wallets/internal/repository"
 	"wallets/internal/services/api/bybit"
+	"wallets/internal/services/api/notifications"
 
 	"github.com/btcsuite/btcd/btcutil/hdkeychain"
 	"github.com/btcsuite/btcd/chaincfg"
@@ -231,6 +232,38 @@ func (tron *Tron) GetMasterWallet() (map[string]any, error) {
 	}, nil
 }
 
+// GetMasterWalletBalance Get token balance amount for master wallet
+// currency: Token ticker
+// Returns Balance amount for token
+func (tron *Tron) GetMasterWalletBalance(currency string) (float64, error) {
+	// Get master wallet info from Vault
+	masterData, err := vault.GetClient().GetSecret("master/" + tron.NetworkCode)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get master data: %w", err)
+	}
+	masterAddr, ok := masterData["address"].(string)
+	if !ok || masterAddr == "" {
+		return 0, fmt.Errorf("master address not found in Vault")
+	}
+
+	var balance float64
+	if currency == "TRX" {
+		balance, err = tron.getNativeBalance(masterAddr)
+	} else {
+		contractAddr, ok := config.ContractsAddresses[tron.NetworkCode][currency]
+		if !ok {
+			return 0, fmt.Errorf("unsupported currency %q on network %s", currency, tron.NetworkCode)
+		}
+
+		balance, err = tron.getTrc20Balance(contractAddr, masterAddr)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("failed to get %s balance for %s master wallet: %w", currency, tron.NetworkCode, err)
+	}
+
+	return balance, nil
+}
+
 // GetTransactionCommission Get transaction commission
 // oType: Operation type (withdrawal/inner)
 // wType: Wallet type (master/user)
@@ -255,7 +288,7 @@ func (tron *Tron) GetTransactionCommission(oType, wType string, wId *uint32, cur
 		chainFee, err = tron.calcTrc20Fee(currency, walletAddr, toAddr, amount)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to get transaction commission: %w", err)
+		return nil, err
 	}
 
 	var bybitFee, amlFee float64
@@ -317,6 +350,18 @@ func (tron *Tron) SendTransaction(wType string, wId *uint32, currency, toAddr st
 	}
 
 	if err != nil {
+		// Send notifications to channels
+		wIdPart := ""
+		if wType == "user" {
+			wIdPart = fmt.Sprintf(" [ID: %d]", wId)
+		}
+		errMsg := fmt.Sprintf("[SendTransaction] [%s] failed to send transaction (%f %s) from %s%s to %s: %v",
+			tron.NetworkCode, amount, currency, wType, wIdPart, toAddr, err)
+		errSend := notifications.GetClient().SendNotifications(context.Background(), errMsg)
+		if errSend != nil {
+			return "", errSend
+		}
+
 		return "", fmt.Errorf("failed to send transaction: %w", err)
 	}
 	return hash, nil
@@ -328,6 +373,16 @@ func (tron *Tron) SendTransaction(wType string, wId *uint32, currency, toAddr st
 func (tron *Tron) GetInboundTransactions(ctx context.Context) ([]*InboundTransaction, error) {
 	// Create rate limiter
 	limiter := rate.NewLimiter(rate.Limit(tron.RateLimit), 1)
+
+	// Get master wallet for network
+	masterData, err := vault.GetClient().GetSecret("master/" + tron.NetworkCode)
+	if err != nil {
+		return nil, fmt.Errorf("[%s] Failed to get master data: %w", tron.NetworkCode, err)
+	}
+	masterAddr, ok := masterData["address"].(string)
+	if !ok || masterAddr == "" {
+		return nil, fmt.Errorf("[%s] Master address not found in Vault", tron.NetworkCode)
+	}
 
 	// Get current block
 	if err := limiter.Wait(ctx); err != nil {
@@ -433,7 +488,7 @@ func (tron *Tron) GetInboundTransactions(ctx context.Context) ([]*InboundTransac
 				}
 
 				// Get tx hash
-				txId := fmt.Sprintf("%x", tx.GetTxid())
+				txHash := fmt.Sprintf("%x", tx.GetTxid())
 				// Skip, if transaction is not success
 				if tx.Result == nil || tx.Result.Code != api.Return_SUCCESS {
 					continue
@@ -464,13 +519,19 @@ func (tron *Tron) GetInboundTransactions(ctx context.Context) ([]*InboundTransac
 
 					// Check if address exists in network addresses list
 					if userId, ok := addressList[toAddr]; ok {
+						// Skip, if transaction sent from master wallet
+						if fromAddr == masterAddr {
+							log.Printf("[%s] Skipping '%s' tx from master wallet", tron.NetworkCode, txHash)
+							continue
+						}
+
 						// Get converted amount (in TRX)
 						amount, _ := decimals.RemoveDecimals(big.NewInt(transferContract.Amount), int64(trxDecimals)).Float64()
 
 						localTxList = append(localTxList, &InboundTransaction{
 							UserId:   userId,
 							Currency: "TRX",
-							TxId:     txId,
+							TxId:     txHash,
 							From:     fromAddr,
 							To:       toAddr,
 							Amount:   amount,
@@ -508,8 +569,10 @@ func (tron *Tron) GetInboundTransactions(ctx context.Context) ([]*InboundTransac
 						// Check if method is transfer (a9059cbb)
 						methodId := fmt.Sprintf("%x", triggerContract.Data[0:4])
 						if methodId == "a9059cbb" {
-							// Extract to address (bytes 4-36, take last 20 bytes)
-							toAddrBytes := triggerContract.Data[16:36]
+							// Extract to address (bytes 4-36, take last 21 bytes)
+							toAddrBytes := triggerContract.Data[15:36]
+							// Extract amount (bytes 36-68)
+							rawAmount := new(big.Int).SetBytes(triggerContract.Data[36:68])
 
 							// Get from and to address
 							fromAddr := address.Address(triggerContract.OwnerAddress).String()
@@ -517,10 +580,17 @@ func (tron *Tron) GetInboundTransactions(ctx context.Context) ([]*InboundTransac
 
 							// Check if address exists in network addresses list
 							if userId, ok := addressList[toAddr]; ok {
+								// Skip, if transaction sent from master wallet
+								if fromAddr == masterAddr {
+									log.Printf("[%s] Skipping '%s' tx from master wallet", tron.NetworkCode, txHash)
+									continue
+								}
+
 								// Trying to get contract decimals from cache
 								tron.decimalsCacheMu.RLock()
 								decimalsValue, exists := tron.decimalsCache[contractAddr]
 								tron.decimalsCacheMu.RUnlock()
+
 								// Fetch decimals from contract
 								if !exists {
 									if err := limiter.Wait(cancelCtx); err != nil {
@@ -541,15 +611,13 @@ func (tron *Tron) GetInboundTransactions(ctx context.Context) ([]*InboundTransac
 									tron.decimalsCacheMu.Unlock()
 								}
 
-								// Extract amount (bytes 36-68)
-								rawAmount := new(big.Int).SetBytes(triggerContract.Data[36:68])
 								// Get converted amount
 								amount, _ := decimals.RemoveDecimals(rawAmount, decimalsValue).Float64()
 
 								localTxList = append(localTxList, &InboundTransaction{
 									UserId:   userId,
 									Currency: token,
-									TxId:     txId,
+									TxId:     txHash,
 									From:     fromAddr,
 									To:       toAddr,
 									Amount:   amount,
@@ -684,6 +752,31 @@ func (tron *Tron) deriveWallet(mnemonic string, userId uint32) (string, string, 
 }
 
 /* GetMasterWallet private methods group */
+// @private getDecimals Get token decimals by contract address with caching
+// contractAddr: Token contract address
+// Returns: Token decimals
+func (tron *Tron) getDecimals(contractAddr string) (int64, error) {
+	tron.decimalsCacheMu.RLock()
+	decimalsValue, exists := tron.decimalsCache[contractAddr]
+	tron.decimalsCacheMu.RUnlock()
+
+	if exists {
+		return decimalsValue, nil
+	}
+
+	result, err := tron.Client.TRC20GetDecimals(contractAddr)
+	if err != nil {
+		return 0, err
+	}
+	decimalsValue = result.Int64()
+
+	tron.decimalsCacheMu.Lock()
+	tron.decimalsCache[contractAddr] = decimalsValue
+	tron.decimalsCacheMu.Unlock()
+
+	return decimalsValue, nil
+}
+
 // @private getNativeBalance Get wallet TRX balance
 // addr: Wallet address
 // Returns: TRX wallet balance
@@ -726,13 +819,13 @@ func (tron *Tron) getTrc20Balance(contractAddr, addr string) (float64, error) {
 	}
 
 	// Get contract decimals
-	decimalsValue, err := tron.Client.TRC20GetDecimals(contractAddr)
+	decimalsValue, err := tron.getDecimals(contractAddr)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get contract decimals: %w", err)
 	}
 
 	// Get converted balance
-	convertedBalance, _ := decimals.RemoveDecimals(rawBalance, decimalsValue.Int64()).Float64()
+	convertedBalance, _ := decimals.RemoveDecimals(rawBalance, decimalsValue).Float64()
 	return convertedBalance, nil
 }
 
@@ -827,12 +920,12 @@ func (tron *Tron) calcTrc20Fee(currency, fromAddr, toAddr string, amount float64
 	}
 
 	// Get contract decimals
-	contractDecimals, err := tron.Client.TRC20GetDecimals(contractAddr)
+	contractDecimals, err := tron.getDecimals(contractAddr)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get contract decimals for %s: %w", currency, err)
 	}
 	// Convert amount to SUN with contract decimals
-	amountSun, _ := decimals.ApplyDecimals(big.NewFloat(amount), contractDecimals.Int64())
+	amountSun, _ := decimals.ApplyDecimals(big.NewFloat(amount), contractDecimals)
 
 	// Try to calc energy needed value
 	var energyNeeded int
@@ -956,7 +1049,8 @@ func (tron *Tron) sendNative(fromAddr, toAddr string, amount float64, privateKey
 	}
 	// Check TRX balance before sending
 	if trxBalance < amount+txFee {
-		return "", fmt.Errorf("insufficient balance: have %f %s, need %f + %f %s", trxBalance, "TRX", amount, txFee, "TRX")
+		return "", fmt.Errorf("insufficient balance: have %f %s, need %f + %f (fee) %s",
+			trxBalance, "TRX", amount, txFee, "TRX")
 	}
 
 	// Get TRX decimals
@@ -1013,12 +1107,12 @@ func (tron *Tron) sendTrc20(currency, fromAddr, toAddr string, amount float64, p
 	}
 
 	// Get contract decimals
-	contractDecimals, err := tron.Client.TRC20GetDecimals(contractAddr)
+	contractDecimals, err := tron.getDecimals(contractAddr)
 	if err != nil {
 		return "", fmt.Errorf("failed to get contract decimals: %w", err)
 	}
 	// Convert amount to SUN with contract decimals
-	amountSun, _ := decimals.ApplyDecimals(big.NewFloat(amount), contractDecimals.Int64())
+	amountSun, _ := decimals.ApplyDecimals(big.NewFloat(amount), contractDecimals)
 
 	// Create TRC20 transaction
 	tx, err := tron.Client.TRC20Send(fromAddr, toAddr, contractAddr, amountSun, 0)

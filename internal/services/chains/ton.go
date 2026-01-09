@@ -21,6 +21,7 @@ import (
 	"wallets/internal/database/vault"
 	"wallets/internal/repository"
 	"wallets/internal/services/api/bybit"
+	"wallets/internal/services/api/notifications"
 	"wallets/internal/utils"
 
 	"github.com/xssnick/tonutils-go/address"
@@ -205,6 +206,50 @@ func (ton *Ton) GetMasterWallet() (map[string]any, error) {
 	}, nil
 }
 
+// GetMasterWalletBalance Get token balance amount for master wallet
+// currency: Token ticker
+// Returns Balance amount for token
+func (ton *Ton) GetMasterWalletBalance(currency string) (float64, error) {
+	// Get master wallet info from Vault
+	masterData, err := vault.GetClient().GetSecret("master/" + ton.NetworkCode)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get master data: %w", err)
+	}
+	masterAddr, ok := masterData["address"].(string)
+	if !ok || masterAddr == "" {
+		return 0, fmt.Errorf("master address not found in Vault")
+	}
+	masterMnemonic, ok := masterData["mnemonic"].(string)
+	if !ok || masterMnemonic == "" {
+		return 0, fmt.Errorf("master mnemonic not found in Vault")
+	}
+	seedWords := strings.Split(masterMnemonic, " ")
+
+	var balance float64
+	if currency == "TON" {
+		// Init wallet instance
+		walletInstance, err := wallet.FromSeedWithOptions(ton.Client, seedWords, ton.WalletVersion)
+		if err != nil {
+			return 0, fmt.Errorf("failed to init wallet instance: %w", err)
+		}
+
+		balance, err = ton.getNativeBalance(walletInstance)
+
+	} else {
+		contractAddr, ok := config.ContractsAddresses[ton.NetworkCode][currency]
+		if !ok {
+			return 0, fmt.Errorf("unsupported currency %q on network %s", currency, ton.NetworkCode)
+		}
+
+		balance, err = ton.getJettonBalance(currency, contractAddr, masterAddr)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("failed to get %s balance for %s master wallet: %w", currency, ton.NetworkCode, err)
+	}
+
+	return balance, nil
+}
+
 // GetTransactionCommission Get transaction commission
 // oType: Operation type (withdrawal/inner)
 // wType: Wallet type (always master in TON)
@@ -242,7 +287,7 @@ func (ton *Ton) GetTransactionCommission(oType, wType string, wId *uint32, curre
 		chainFee, err = ton.calcJettonFee(walletInstance, currency, toAddr, amount, memo)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to get transaction commission: %w", err)
+		return nil, err
 	}
 
 	var bybitFee, amlFee float64
@@ -386,6 +431,14 @@ func (ton *Ton) SendTransaction(wType string, wId *uint32, currency, toAddr stri
 	}
 
 	if err != nil {
+		// Send notifications to channels
+		errMsg := fmt.Sprintf("[SendTransaction] [%s] failed to send transaction (%f %s) from master to %s: %v",
+			ton.NetworkCode, amount, currency, toAddr, err)
+		errSend := notifications.GetClient().SendNotifications(context.Background(), errMsg)
+		if errSend != nil {
+			return "", errSend
+		}
+
 		return "", fmt.Errorf("failed to send transaction: %w", err)
 	}
 
@@ -468,8 +521,7 @@ func (ton *Ton) GetInboundTransactions(ctx context.Context) ([]*InboundTransacti
 				log.Printf("[%s] No txs found yet at wallet", ton.NetworkCode)
 				return []*InboundTransaction{}, nil
 			}
-			return nil, fmt.Errorf("[%s] Failed to get txs for master address: %w",
-				ton.NetworkCode, err)
+			return nil, fmt.Errorf("[%s] Failed to get txs for master address: %w", ton.NetworkCode, err)
 		}
 
 		// Check if tx list is not empty
@@ -868,6 +920,10 @@ func (ton *Ton) calcJettonFee(walletInstance *wallet.Wallet, currency, toAddr st
 	currency = strings.ToUpper(currency)
 	networkCfg, _ := config.GetNetworkConfig(ton.NetworkCode)
 
+	// Get forward fee and message fee from config
+	forwardTonAmount := tlb.MustFromTON(networkCfg.ForwardFee)
+	messageTonAmount := tlb.MustFromTON(networkCfg.MessageFee)
+
 	// Get token contract address
 	contractAddr, ok := config.GetContractAddress(ton.NetworkCode, currency)
 	if !ok {
@@ -882,14 +938,10 @@ func (ton *Ton) calcJettonFee(walletInstance *wallet.Wallet, currency, toAddr st
 	if err != nil {
 		// Fallback - wallet not initialized or no jetton wallet
 		if strings.Contains(err.Error(), "not initialized") || strings.Contains(err.Error(), "exit code") {
-			return networkCfg.FallbackFee, nil // ~0.05 TON for jetton transfer
+			return networkCfg.FallbackFee, nil // ~0.1 TON for jetton transfer
 		}
 		return 0, fmt.Errorf("failed to get jetton wallet: %w", err)
 	}
-
-	// Get forward fee and message fee from config
-	forwardTonAmount := tlb.MustFromTON(networkCfg.ForwardFee)
-	messageTonAmount := tlb.MustFromTON(networkCfg.MessageFee)
 
 	// Get jetton decimals from config
 	decimals := config.TokenSettings[ton.NetworkCode][currency].Decimals
@@ -925,11 +977,9 @@ func (ton *Ton) calcJettonFee(walletInstance *wallet.Wallet, currency, toAddr st
 		payload,                // Transfer payload
 	))
 	if err != nil {
-		// Fallback - wallet not initialized
-		if strings.Contains(err.Error(), "not initialized") {
-			return networkCfg.FallbackFee, nil // ~0.05 TON for jetton transfer
-		}
-		return 0, fmt.Errorf("failed to build external message: %w", err)
+		log.Printf("failed to build external message: %v, using fallback fee", err)
+		// Fallback - wallet not initialized ( ~0.1 TON for jetton transfer)
+		return networkCfg.FallbackFee, nil
 	}
 
 	// Send fee estimation request and return total fee
@@ -1022,6 +1072,22 @@ func (ton *Ton) sendCalcFeeRequest(fromAddr *address.Address, extMessage *tlb.Ex
 func (ton *Ton) sendNative(walletInstance *wallet.Wallet, toAddr string, amount float64, memo string) (string, error) {
 	ctx := context.Background()
 
+	// Get TON balance
+	tonBalance, err := ton.getNativeBalance(walletInstance)
+	if err != nil {
+		return "", fmt.Errorf("failed to get TON balance: %w", err)
+	}
+	// Get tx fee (in TON)
+	txFee, err := ton.calcNativeFee(walletInstance, toAddr, amount, memo)
+	if err != nil {
+		return "", fmt.Errorf("failed to get TON tx fee: %w", err)
+	}
+	// Check TON balance before sending
+	if tonBalance < amount+txFee {
+		return "", fmt.Errorf("insufficient balance: have %f %s, need %f + %f (fee) %s",
+			tonBalance, "TON", amount, txFee, "TON")
+	}
+
 	// Get converted amount (in nanoTON)
 	amountConverted := tlb.MustFromTON(strconv.FormatFloat(amount, 'f', -1, 64))
 
@@ -1061,10 +1127,36 @@ func (ton *Ton) sendJetton(currency string, walletInstance *wallet.Wallet, toAdd
 	currency = strings.ToUpper(currency)
 	networkCfg, _ := config.GetNetworkConfig(ton.NetworkCode)
 
+	// Get forward fee and message fee from config
+	forwardTonAmount := tlb.MustFromTON(networkCfg.ForwardFee)
+	messageTonAmount := tlb.MustFromTON(networkCfg.MessageFee)
+
 	// Get token contract address from config
 	contractAddr, ok := config.GetContractAddress(ton.NetworkCode, currency)
 	if !ok {
 		return "", fmt.Errorf("contract address not found: %s/%s", ton.NetworkCode, currency)
+	}
+
+	// Get TON and token balances
+	tonBalance, err := ton.getNativeBalance(walletInstance)
+	if err != nil {
+		return "", fmt.Errorf("failed to get TON balance: %w", err)
+	}
+	jettonBalance, err := ton.getJettonBalance(currency, contractAddr, walletInstance.WalletAddress().String())
+	if err != nil {
+		return "", fmt.Errorf("failed to get %s balance: %w", currency, err)
+	}
+	// Get tx fee (in TON)
+	txFee, err := ton.calcJettonFee(walletInstance, currency, toAddr, amount, memo)
+	if err != nil {
+		return "", fmt.Errorf("failed to get TON tx fee: %w", err)
+	}
+	// Check TON and currency balances before sending
+	if tonBalance < txFee {
+		return "", fmt.Errorf("insufficient TON balance: have %f %s, need %f %s", tonBalance, "TON", txFee, "TON")
+	}
+	if jettonBalance < amount {
+		return "", fmt.Errorf("insufficient currency balance: have %f %s, need %f %s", jettonBalance, currency, amount, currency)
 	}
 
 	// Get jetton master client
@@ -1075,10 +1167,6 @@ func (ton *Ton) sendJetton(currency string, walletInstance *wallet.Wallet, toAdd
 	if err != nil {
 		return "", fmt.Errorf("failed to get sender jetton wallet: %w", err)
 	}
-
-	// Get forward fee and message fee from config
-	forwardTonAmount := tlb.MustFromTON(networkCfg.ForwardFee)
-	messageTonAmount := tlb.MustFromTON(networkCfg.MessageFee)
 
 	// Get jetton decimals from config
 	decimals := config.TokenSettings[ton.NetworkCode][currency].Decimals
@@ -1117,6 +1205,54 @@ func (ton *Ton) sendJetton(currency string, walletInstance *wallet.Wallet, toAdd
 		return "", fmt.Errorf("failed to send jetton transaction: %w", err)
 	}
 
+	// Check transaction send result
+	err = ton.checkTxResult(tx)
+	if err != nil {
+		return "", fmt.Errorf("transaction failed: %w", err)
+	}
+
 	// Return transaction hash
 	return base64.StdEncoding.EncodeToString(tx.Hash), nil
+}
+
+// @private checkTxResult Check transaction send result
+// tx: Transaction instance
+// Returns: Error if found
+func (ton *Ton) checkTxResult(tx *tlb.Transaction) error {
+	// Get transaction desc
+	desc, ok := tx.Description.(tlb.TransactionDescriptionOrdinary)
+	if !ok {
+		return fmt.Errorf("unexpected transaction description type")
+	}
+
+	// Check aborted flag
+	if desc.Aborted {
+		return fmt.Errorf("transaction was aborted")
+	}
+
+	// Check compute phase
+	switch desc.ComputePhase.Phase.(type) {
+	case tlb.ComputePhaseVM:
+		vm := desc.ComputePhase.Phase.(tlb.ComputePhaseVM)
+		if !vm.Success {
+			return fmt.Errorf("transaction compute phase failed, exit code: %d", vm.Details.ExitCode)
+		}
+		if vm.Details.ExitCode != 0 {
+			return fmt.Errorf("transaction failed with exit code: %d", vm.Details.ExitCode)
+		}
+
+	case tlb.ComputePhaseSkipped:
+		skipped := desc.ComputePhase.Phase.(tlb.ComputePhaseSkipped)
+		return fmt.Errorf("compute phase was skipped, reason: %s", skipped.Reason.Type)
+
+	default:
+		return fmt.Errorf("unexpected compute phase type")
+	}
+
+	// Check action phase, if exists
+	if desc.ActionPhase != nil && !desc.ActionPhase.Success {
+		return fmt.Errorf("action phase failed, result code: %d", desc.ActionPhase.ResultCode)
+	}
+
+	return nil
 }

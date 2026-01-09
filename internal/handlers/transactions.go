@@ -102,5 +102,5 @@ func (h *TransactionsHandler) SendWithdrawal(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
-	return c.JSON(fiber.Map{"transaction": res})
+	return c.JSON(res)
 }

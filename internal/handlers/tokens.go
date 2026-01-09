@@ -41,5 +41,5 @@ func (h *TokensHandler) GetTokenInfo(c *fiber.Ctx) error {
 	if err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 	}
-	return c.JSON(fiber.Map{"info": res})
+	return c.JSON(res)
 }

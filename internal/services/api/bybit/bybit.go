@@ -3,6 +3,7 @@ package bybit
 import (
 	"context"
 	"fmt"
+	"log"
 	"reflect"
 	"strconv"
 	"strings"
@@ -141,8 +142,7 @@ func (c *HTTPClient) GetDepositAddress(ctx context.Context, coin, network string
 }
 
 // GetWalletBalance Get wallet balance
-// @docs https://bybit-exchange.github.io/docs/v5/account/wallet-balance
-// @note Unused method
+// @docs https://bybit-exchange.github.io/docs/v5/asset/balance/all-balance
 // coin: Currency ticker
 // accountType: Account type (FUND, UNIFIED)
 // Returns: Wallet balance
@@ -150,21 +150,15 @@ func (c *HTTPClient) GetWalletBalance(ctx context.Context, coin, accountType str
 	resultMap, err := c.sendRequest(ctx, map[string]any{
 		"coin":        coin,
 		"accountType": accountType,
-	}, "GetAccountWallet")
+	}, "GetAllCoinsBalance")
 	if err != nil {
 		return 0, err
 	}
 
-	if coinsData, ok := utils.DataGet(resultMap, "list.0.coin"); ok {
-		if coins, ok := coinsData.([]any); ok {
-			for _, coinItem := range coins {
-				if coinName, _ := utils.DataGet(coinItem, "coin"); coinName == coin {
-					if balanceStr, ok := utils.DataGet(coinItem, "walletBalance"); ok {
-						if balance, err := strconv.ParseFloat(balanceStr.(string), 64); err == nil {
-							return balance, nil
-						}
-					}
-				}
+	if coinItem, ok := utils.DataGet(resultMap, "balance.0"); ok {
+		if balanceStr, ok := utils.DataGet(coinItem, "walletBalance"); ok {
+			if balance, err := strconv.ParseFloat(balanceStr.(string), 64); err == nil {
+				return balance, nil
 			}
 		}
 	}
@@ -212,7 +206,7 @@ func (c *HTTPClient) GetWithdrawalRecords(ctx context.Context, params map[string
 }
 
 // CreateWithdraw Create new withdraw from bybit to master wallet and return bybit withdraw id
-// Withdrawals can be only from FUND account type
+// @note Withdrawals can be only from FUND account type
 // @docs https://bybit-exchange.github.io/docs/v5/asset/withdraw
 // coin: Currency ticker
 // chain: Network code
@@ -225,34 +219,64 @@ func (c *HTTPClient) CreateWithdraw(ctx context.Context, coin, chain string, amo
 		return "", fmt.Errorf("[Bybit API] CreateWithdraw: Network %s not supported", chain)
 	}
 
-	// Get master wallet address for network from Vault
-	masterAddress, err := vault.GetClient().GetSecret("/master/" + chain)
+	// Get master wallet info from Vault
+	masterData, err := vault.GetClient().GetSecret("master/" + chain)
 	if err != nil {
-		return "", fmt.Errorf("[Bybit API] CreateWithdraw: Failed to get master address: %w", err)
+		return "", fmt.Errorf("[Bybit API] CreateWithdraw: Failed to get master data: %w", err)
+	}
+	masterAddr, ok := masterData["address"].(string)
+
+	// Get coin info
+	coinInfo, err := c.GetCoinInfo(ctx, coin, chain)
+	if err != nil {
+		return "", fmt.Errorf("[Bybit API] CreateWithdraw: %w", err)
 	}
 
-	// Get min withdrawal amount for network from coin info method
-	minWithdrawal, err := c.getMinWithdrawalAmount(ctx, coin, chain)
-	if err != nil {
-		return "", fmt.Errorf("[Bybit API] CreateWithdraw: Failed to get min withdrawal amount: %w", err)
+	// Get min withdrawal amount for network
+	minWithdrawal := 0.0
+	if minData, ok := utils.DataGet(coinInfo, "network.withdrawMin"); ok {
+		if minStr, ok := minData.(string); ok {
+			minWithdrawal, _ = strconv.ParseFloat(minStr, 64)
+		}
 	}
 
 	// Check amount for min withdrawal value for coin in network
 	if amount < minWithdrawal {
-		return "", fmt.Errorf("[Bybit API] CreateWithdraw: Amount is less than the min withdrawal amount")
+		return "", fmt.Errorf("[Bybit API] CreateWithdraw: Amount is less than the token min withdrawal (%f)", minWithdrawal)
 	}
 
-	// Transfer needed amount from UNIFIED to FUND balance to withdraw
-	_, err = c.createInternalTransfer(ctx, coin, strconv.FormatFloat(amount, 'g', -1, 64), "UNIFIED", "FUND")
+	// Get withdrawal fee for network
+	withdrawFee := 0.0
+	if feeData, ok := utils.DataGet(coinInfo, "network.withdrawFee"); ok {
+		if feeStr, ok := feeData.(string); ok {
+			withdrawFee, _ = strconv.ParseFloat(feeStr, 64)
+		}
+	}
+	// Total amount needed (amount + fee)
+	totalAmount := amount + withdrawFee
+
+	// Check FUND balance
+	fundBalance, err := c.GetWalletBalance(ctx, coin, "FUND")
 	if err != nil {
 		return "", err
+	}
+	log.Printf("[DEBUG] [CreateWithdraw] Have %f on FUND, need %s %s", fundBalance, strconv.FormatFloat(amount, 'f', -1, 64), coin)
+	if fundBalance < totalAmount {
+		// Transfer needed amount from UNIFIED to FUND balance to withdraw, if needed
+		neededFundAmount := totalAmount - fundBalance
+		_, err = c.createInternalTransfer(
+			ctx, coin, strconv.FormatFloat(neededFundAmount, 'f', 8, 64), "UNIFIED", "FUND",
+		)
+		if err != nil {
+			return "", err
+		}
 	}
 
 	// Send withdraw request from FUND account to master wallet
 	resultMap, err := c.sendRequest(ctx, map[string]any{
 		"coin":        coin,
 		"chain":       bybitChain,
-		"address":     masterAddress,
+		"address":     masterAddr,
 		"amount":      strconv.FormatFloat(amount, 'f', 8, 64),
 		"timestamp":   time.Now().UnixMilli(),
 		"accountType": "FUND",
@@ -275,7 +299,7 @@ func (c *HTTPClient) CreateWithdraw(ctx context.Context, coin, chain string, amo
 // fromAccountType: Account type (FUND, UNIFIED)
 // toAccountType: Account type (UNIFIED, FUND)
 // Returns: Bybit transfer ID
-func (c *HTTPClient) createInternalTransfer(ctx context.Context, coin, amount, fromAccountType, toAccountType string) (int, error) {
+func (c *HTTPClient) createInternalTransfer(ctx context.Context, coin, amount, fromAccountType, toAccountType string) (string, error) {
 	resultMap, err := c.sendRequest(ctx, map[string]any{
 		"transferId":      uuid.NewString(),
 		"coin":            coin,
@@ -284,38 +308,13 @@ func (c *HTTPClient) createInternalTransfer(ctx context.Context, coin, amount, f
 		"toAccountType":   toAccountType,
 	}, "CreateInternalTransfer")
 	if err != nil {
-		return 0, err
+		return "", err
 	}
 
-	if idStr, ok := utils.DataGet(resultMap, "id"); ok {
-		id, err := strconv.Atoi(idStr.(string))
-		if err != nil {
-			return 0, fmt.Errorf("failed to parse transfer ID '%s': %w", idStr, err)
-		}
-		return id, nil
+	if idStr, ok := utils.DataGet(resultMap, "transferId"); ok {
+		return idStr.(string), nil
 	}
-	return 0, fmt.Errorf("[Bybit API] CreateInternalTransfer: Invalid response format")
-}
-
-// @private getMinWithdrawalAmount Get min withdrawal amount for coin in network
-// coin: Currency ticker
-// network: Network code
-// Returns: Minimal withdrawal amount
-func (c *HTTPClient) getMinWithdrawalAmount(ctx context.Context, coin, network string) (float64, error) {
-	result, err := c.GetCoinInfo(ctx, coin, network)
-	if err != nil {
-		return 0, err
-	}
-
-	if minData, ok := utils.DataGet(result, "network.withdrawMin"); ok {
-		if minStr, ok := minData.(string); ok {
-			if minVal, err := strconv.ParseFloat(minStr, 64); err == nil {
-				return minVal, nil
-			}
-		}
-	}
-	return 0, fmt.Errorf("[Bybit API] getMinWithdrawalAmount: Min withdrawal amount not found for coin '%s' on network '%s'",
-		coin, network)
+	return "", fmt.Errorf("[Bybit API] CreateInternalTransfer: Invalid response format")
 }
 
 // @private sendRequest Send request to Bybit API and return response result or error

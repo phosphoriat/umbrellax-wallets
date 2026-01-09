@@ -14,6 +14,7 @@ import (
 	"wallets/internal/database/vault"
 	"wallets/internal/repository"
 	"wallets/internal/services/api/bybit"
+	"wallets/internal/services/api/notifications"
 	"wallets/internal/utils"
 
 	"github.com/btcsuite/btcd/btcjson"
@@ -219,6 +220,47 @@ func (btc *Bitcoin) GetMasterWallet() (map[string]any, error) {
 	}, nil
 }
 
+// GetMasterWalletBalance Get token balance amount for master wallet
+// currency: Token ticker
+// Returns Balance amount for token
+func (btc *Bitcoin) GetMasterWalletBalance(currency string) (float64, error) {
+	// Get master wallet address from Vault
+	masterData, err := vault.GetClient().GetSecret("master/" + btc.NetworkCode)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get master data: %w", err)
+	}
+	masterAddr, ok := masterData["address"].(string)
+	if !ok || masterAddr == "" {
+		return 0, fmt.Errorf("master address not found in Vault")
+	}
+
+	// Parse and validate master address
+	addr, err := btcutil.DecodeAddress(masterAddr, btc.ChainParams)
+	if err != nil {
+		return 0, fmt.Errorf("invalid master address: %w", err)
+	}
+
+	// Get UXTO for the address
+	unspentList, err := btc.Client.ListUnspentMinMaxAddresses(0, 9999999, []btcutil.Address{addr})
+	if err != nil {
+		return 0, fmt.Errorf("failed to list unspent: %w", err)
+	}
+
+	// Calculate total balance from UTXOs
+	var totalBalance btcutil.Amount
+	for _, utxo := range unspentList {
+		amount, err := btcutil.NewAmount(utxo.Amount)
+		if err != nil {
+			continue
+		}
+		totalBalance += amount
+	}
+	// Get converted balance (in BTC)
+	btcBalance := totalBalance.ToBTC()
+
+	return btcBalance, nil
+}
+
 // GetTransactionCommission Get transaction commission
 // oType: Operation type (withdrawal/inner)
 // wType: Wallet type (master/user)
@@ -313,7 +355,7 @@ func (btc *Bitcoin) GetTransactionStatus(hash, fromAddr string) (string, error) 
 // amount: Amount in float value
 // memo: Memo tag
 // Returns: Transaction hash
-func (btc *Bitcoin) SendTransaction(wType string, wId *uint32, currency, to string, amount float64, memo string) (string, error) {
+func (btc *Bitcoin) SendTransaction(wType string, wId *uint32, currency, toAddr string, amount float64, memo string) (string, error) {
 	// Get wallet address and private key by type and id
 	walletAddr, walletKey, err := btc.getWallet(wType, wId)
 	if err != nil {
@@ -335,7 +377,7 @@ func (btc *Bitcoin) SendTransaction(wType string, wId *uint32, currency, to stri
 		return "", fmt.Errorf("from address must be Native SegWit (bc1q...)")
 	}
 	// Parse to address
-	toAddress, err := btcutil.DecodeAddress(to, btc.ChainParams)
+	toAddrParsed, err := btcutil.DecodeAddress(toAddr, btc.ChainParams)
 	if err != nil {
 		return "", fmt.Errorf("failed to parse to address: %w", err)
 	}
@@ -354,7 +396,19 @@ func (btc *Bitcoin) SendTransaction(wType string, wId *uint32, currency, to stri
 
 	// Check wallet BTC balance before sending
 	if totalInput < amountSatoshi+estimatedFee {
-		return "", fmt.Errorf("insufficient BTC balance: have %f BTC, need %f + %f BTC",
+		// Send notifications to channels
+		wIdPart := ""
+		if wType == "user" {
+			wIdPart = fmt.Sprintf(" [ID: %d]", wId)
+		}
+		errMsg := fmt.Sprintf("[SendTransaction] [%s] failed to send transaction (%f %s) from %s%s to %s: %v",
+			btc.NetworkCode, amount, currency, wType, wIdPart, toAddr, err)
+		errSend := notifications.GetClient().SendNotifications(context.Background(), errMsg)
+		if errSend != nil {
+			return "", errSend
+		}
+
+		return "", fmt.Errorf("insufficient BTC balance: have %f BTC, need %f + %f (fee) BTC",
 			totalInput.ToBTC(), amountSatoshi.ToBTC(), estimatedFee.ToBTC())
 	}
 
@@ -393,7 +447,7 @@ func (btc *Bitcoin) SendTransaction(wType string, wId *uint32, currency, to stri
 	}
 
 	// Add recipient output
-	toScript, err := txscript.PayToAddrScript(toAddress)
+	toScript, err := txscript.PayToAddrScript(toAddrParsed)
 	if err != nil {
 		return "", fmt.Errorf("failed to create output script: %w", err)
 	}
@@ -458,6 +512,16 @@ func (btc *Bitcoin) SendTransaction(wType string, wId *uint32, currency, to stri
 func (btc *Bitcoin) GetInboundTransactions(ctx context.Context) ([]*InboundTransaction, error) {
 	// Create rate limiter
 	limiter := rate.NewLimiter(rate.Limit(btc.RateLimit), 1)
+
+	// Get master wallet for network
+	masterData, err := vault.GetClient().GetSecret("master/" + btc.NetworkCode)
+	if err != nil {
+		return nil, fmt.Errorf("[%s] Failed to get master data: %w", btc.NetworkCode, err)
+	}
+	masterAddr, ok := masterData["address"].(string)
+	if !ok || masterAddr == "" {
+		return nil, fmt.Errorf("[%s] Master address not found in Vault", btc.NetworkCode)
+	}
 
 	// Get current block height
 	if err := limiter.Wait(ctx); err != nil {
@@ -629,6 +693,12 @@ func (btc *Bitcoin) GetInboundTransactions(ctx context.Context) ([]*InboundTrans
 										}
 									}
 								}
+							}
+
+							// Skip, if transaction sent from master wallet
+							if fromAddr == masterAddr {
+								log.Printf("[%s] Skipping '%s' tx from master wallet", btc.NetworkCode, txHash)
+								continue
 							}
 
 							// Get converted amount (in BTC)

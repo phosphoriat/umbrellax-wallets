@@ -20,6 +20,7 @@ import (
 	"wallets/internal/database/vault"
 	"wallets/internal/repository"
 	"wallets/internal/services/api/bybit"
+	"wallets/internal/services/api/notifications"
 	"wallets/internal/utils"
 
 	"github.com/btcsuite/btcd/btcutil/hdkeychain"
@@ -207,6 +208,38 @@ func (sol *Solana) GetMasterWallet() (map[string]any, error) {
 	}, nil
 }
 
+// GetMasterWalletBalance Get token balance amount for master wallet
+// currency: Token ticker
+// Returns Balance amount for token
+func (sol *Solana) GetMasterWalletBalance(currency string) (float64, error) {
+	// Get master wallet info from Vault
+	masterData, err := vault.GetClient().GetSecret("master/" + sol.NetworkCode)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get master data: %w", err)
+	}
+	masterAddr, ok := masterData["address"].(string)
+	if !ok || masterAddr == "" {
+		return 0, fmt.Errorf("master address not found in Vault")
+	}
+
+	var balance float64
+	if currency == "SOL" {
+		balance, err = sol.getNativeBalance(masterAddr)
+	} else {
+		contractAddr, ok := config.ContractsAddresses[sol.NetworkCode][currency]
+		if !ok {
+			return 0, fmt.Errorf("unsupported currency %q on network %s", currency, sol.NetworkCode)
+		}
+
+		balance, err = sol.getSplBalance(contractAddr, masterAddr)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("failed to get %s balance for %s master wallet: %w", currency, sol.NetworkCode, err)
+	}
+
+	return balance, nil
+}
+
 // GetTransactionCommission Get transaction commission
 // oType: Operation type (withdrawal/inner)
 // wType: Wallet type (master/user)
@@ -232,7 +265,7 @@ func (sol *Solana) GetTransactionCommission(oType, wType string, wId *uint32, cu
 		chainFee, err = sol.calcSplFee(currency, walletAddr, toAddr, amount)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to get transaction commission: %w", err)
+		return nil, err
 	}
 
 	var bybitFee, amlFee float64
@@ -321,6 +354,18 @@ func (sol *Solana) SendTransaction(wType string, wId *uint32, currency, toAddr s
 	}
 
 	if err != nil {
+		// Send notifications to channels
+		wIdPart := ""
+		if wType == "user" {
+			wIdPart = fmt.Sprintf(" [ID: %d]", wId)
+		}
+		errMsg := fmt.Sprintf("[SendTransaction] [%s] failed to send transaction (%f %s) from %s%s to %s: %v",
+			sol.NetworkCode, amount, currency, wType, wIdPart, toAddr, err)
+		errSend := notifications.GetClient().SendNotifications(context.Background(), errMsg)
+		if errSend != nil {
+			return "", errSend
+		}
+
 		return "", fmt.Errorf("failed to send transaction: %w", err)
 	}
 
@@ -333,6 +378,16 @@ func (sol *Solana) SendTransaction(wType string, wId *uint32, currency, toAddr s
 func (sol *Solana) GetInboundTransactions(ctx context.Context) ([]*InboundTransaction, error) {
 	// Create rate limiter
 	limiter := rate.NewLimiter(rate.Limit(sol.RateLimit), 1)
+
+	// Get master wallet for network
+	masterData, err := vault.GetClient().GetSecret("master/" + sol.NetworkCode)
+	if err != nil {
+		return nil, fmt.Errorf("[%s] Failed to get master data: %w", sol.NetworkCode, err)
+	}
+	masterAddr, ok := masterData["address"].(string)
+	if !ok || masterAddr == "" {
+		return nil, fmt.Errorf("[%s] Master address not found in Vault", sol.NetworkCode)
+	}
 
 	// Get current block (slot) number
 	if err := limiter.Wait(ctx); err != nil {
@@ -378,20 +433,32 @@ func (sol *Solana) GetInboundTransactions(ctx context.Context) ([]*InboundTransa
 	// Get SOL decimals from config
 	solDecimals := config.TokenSettings[sol.NetworkCode]["SOL"].Decimals
 
-	// Get all new blocks list
-	if err := limiter.Wait(ctx); err != nil {
-		return nil, err
-	}
-	blocks, err := sol.Client.GetBlocks(ctx, lastBlockNumber+1, &currentBlockNum, rpc.CommitmentFinalized)
-	if err != nil {
-		return nil, fmt.Errorf("[%s] failed to get blocks: %w", sol.NetworkCode, err)
+	// Get all new blocks list (in chunks due to RPC limit)
+	const maxBlocksPerRequest = 1000
+	var blocks []uint64
+	for start := lastBlockNumber + 1; start <= currentBlockNum; start += maxBlocksPerRequest {
+		end := start + maxBlocksPerRequest - 1
+		if end > currentBlockNum {
+			end = currentBlockNum
+		}
+
+		if err := limiter.Wait(ctx); err != nil {
+			return nil, err
+		}
+
+		chunk, err := sol.Client.GetBlocks(ctx, start, &end, rpc.CommitmentFinalized)
+		if err != nil {
+			return nil, fmt.Errorf("[%s] failed to get blocks %d-%d: %w", sol.NetworkCode, start, end, err)
+		}
+
+		blocks = append(blocks, chunk...)
 	}
 	if len(blocks) == 0 {
 		return []*InboundTransaction{}, nil
 	}
 
 	log.Printf("[%s] Processing %d blocks from %d to %d",
-		sol.NetworkCode, currentBlockNum-lastBlockNumber, lastBlockNumber+1, currentBlockNum)
+		sol.NetworkCode, len(blocks), lastBlockNumber+1, currentBlockNum)
 
 	var (
 		// Flag for getting versioned transactions
@@ -403,7 +470,7 @@ func (sol *Solana) GetInboundTransactions(ctx context.Context) ([]*InboundTransa
 		// Concurrent save map for successfully processed blocks
 		successfulBlocks = &sync.Map{}
 		// Channel for collect transactions from all blocks
-		resultChan = make(chan []*InboundTransaction, currentBlockNum-lastBlockNumber)
+		resultChan = make(chan []*InboundTransaction, len(blocks))
 		// Goroutines cancellation context
 		cancelCtx, cancel = context.WithCancel(ctx)
 		// First error flag
@@ -529,6 +596,13 @@ func (sol *Solana) GetInboundTransactions(ctx context.Context) ([]*InboundTransa
 							continue
 						}
 						fromAddr := msg.AccountKeys[fromIdx].String()
+
+						// Skip, if transaction sent from master wallet
+						if fromAddr == masterAddr {
+							log.Printf("[%s] Skipping '%s' tx from master wallet", sol.NetworkCode, txHash)
+							continue
+						}
+
 						// Get converted amount (in SOL)
 						rawAmount := binary.LittleEndian.Uint64(instruction.Data[4:12])
 						amount := utils.RemoveDecimals(big.NewInt(int64(rawAmount)), int64(solDecimals))
@@ -544,21 +618,34 @@ func (sol *Solana) GetInboundTransactions(ctx context.Context) ([]*InboundTransa
 
 					// If it's SPL token transfer
 					case programId.Equals(solana.TokenProgramID):
-						// Check instruction type
+						// Check data format
 						if len(instruction.Data) < 9 {
 							continue
 						}
 
+						// Get sender and receiver keys
+						var destIdx, sourceIdx uint16
 						instructionType := instruction.Data[0]
-						if instructionType != 3 && instructionType != 12 {
-							continue
-						}
-						if len(instruction.Accounts) < 2 {
+
+						switch instructionType {
+						case 3: // Transfer: [source, destination, authority]
+							if len(instruction.Accounts) < 2 {
+								continue
+							}
+							sourceIdx = instruction.Accounts[0]
+							destIdx = instruction.Accounts[1]
+
+						case 12: // TransferChecked: [source, mint, destination, authority]
+							if len(instruction.Accounts) < 3 {
+								continue
+							}
+							sourceIdx = instruction.Accounts[0]
+							destIdx = instruction.Accounts[2]
+
+						default:
 							continue
 						}
 
-						// Get receiver key
-						destIdx := instruction.Accounts[1]
 						if int(destIdx) >= len(msg.AccountKeys) {
 							continue
 						}
@@ -644,7 +731,6 @@ func (sol *Solana) GetInboundTransactions(ctx context.Context) ([]*InboundTransa
 
 						// Get from address
 						fromAddr := ""
-						sourceIdx := instruction.Accounts[0]
 						// Try to found in PreTokenBalances
 						if tx.Meta != nil {
 							for _, balance := range tx.Meta.PreTokenBalances {
@@ -669,6 +755,12 @@ func (sol *Solana) GetInboundTransactions(ctx context.Context) ([]*InboundTransa
 									fromAddr = sourceTokenData.Owner.String()
 								}
 							}
+						}
+
+						// Skip, if transaction sent from master wallet
+						if fromAddr == masterAddr {
+							log.Printf("[%s] Skipping '%s' tx from master wallet", sol.NetworkCode, txHash)
+							continue
 						}
 
 						// Get converted amount
@@ -1130,7 +1222,7 @@ func (sol *Solana) sendNative(fromAddr, toAddr string, amount float64, privateKe
 	}
 	// Check SOL balance before sending
 	if solBalance < amount+txFee {
-		return "", fmt.Errorf("insufficient balance: have %f %s, need %f + %f %s", solBalance, "SOL", amount, txFee, "SOL")
+		return "", fmt.Errorf("insufficient balance: have %f %s, need %f + %f (fee) %s", solBalance, "SOL", amount, txFee, "SOL")
 	}
 
 	// Parse private key

@@ -15,6 +15,7 @@ import (
 	"wallets/internal/database/vault"
 	"wallets/internal/repository"
 	"wallets/internal/services/api/bybit"
+	"wallets/internal/services/api/notifications"
 	"wallets/internal/utils"
 
 	"github.com/btcsuite/btcd/btcutil/hdkeychain"
@@ -116,7 +117,7 @@ func (bsc *Bsc) GetUserWalletAddress(userId uint32) (string, error) {
 		return "", fmt.Errorf("failed to derive address for user %d: %w", userId, err)
 	}
 
-	return addr, nil
+	return strings.ToLower(addr), nil
 }
 
 // GetUserWallet Get user wallet info (address and token balances)
@@ -219,6 +220,38 @@ func (bsc *Bsc) GetMasterWallet() (map[string]any, error) {
 	}, nil
 }
 
+// GetMasterWalletBalance Get token balance amount for master wallet
+// currency: Token ticker
+// Returns Balance amount for token
+func (bsc *Bsc) GetMasterWalletBalance(currency string) (float64, error) {
+	// Get master wallet info from Vault
+	masterData, err := vault.GetClient().GetSecret("master/" + bsc.NetworkCode)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get master data: %w", err)
+	}
+	masterAddr, ok := masterData["address"].(string)
+	if !ok || masterAddr == "" {
+		return 0, fmt.Errorf("master address not found in Vault")
+	}
+
+	var balance float64
+	if currency == "BNB" {
+		balance, err = bsc.getNativeBalance(masterAddr)
+	} else {
+		contractAddr, ok := config.ContractsAddresses[bsc.NetworkCode][currency]
+		if !ok {
+			return 0, fmt.Errorf("unsupported currency %q on network %s", currency, bsc.NetworkCode)
+		}
+
+		balance, err = bsc.getBep20Balance(contractAddr, masterAddr)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("failed to get %s balance for %s master wallet: %w", currency, bsc.NetworkCode, err)
+	}
+
+	return balance, nil
+}
+
 // GetTransactionCommission Get transaction commission
 // oType: Operation type (withdrawal/inner)
 // wType: Wallet type (master/user)
@@ -243,7 +276,7 @@ func (bsc *Bsc) GetTransactionCommission(oType, wType string, wId *uint32, curre
 		chainFee, err = bsc.calcBep20Fee(currency, walletAddr, toAddr, amount)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to get transaction commission: %w", err)
+		return nil, err
 	}
 
 	var bybitFee, amlFee float64
@@ -311,6 +344,18 @@ func (bsc *Bsc) SendTransaction(wType string, wId *uint32, currency, toAddr stri
 	}
 
 	if err != nil {
+		// Send notifications to channels
+		wIdPart := ""
+		if wType == "user" {
+			wIdPart = fmt.Sprintf(" [ID: %d]", wId)
+		}
+		errMsg := fmt.Sprintf("[SendTransaction] [%s] failed to send transaction (%f %s) from %s%s to %s: %v",
+			bsc.NetworkCode, amount, currency, wType, wIdPart, toAddr, err)
+		errSend := notifications.GetClient().SendNotifications(context.Background(), errMsg)
+		if errSend != nil {
+			return "", errSend
+		}
+
 		return "", fmt.Errorf("failed to send transaction: %w", err)
 	}
 
@@ -323,6 +368,17 @@ func (bsc *Bsc) SendTransaction(wType string, wId *uint32, currency, toAddr stri
 func (bsc *Bsc) GetInboundTransactions(ctx context.Context) ([]*InboundTransaction, error) {
 	// Create rate limiter
 	limiter := rate.NewLimiter(rate.Limit(bsc.RateLimit), 1)
+
+	// Get master wallet for network
+	masterData, err := vault.GetClient().GetSecret("master/" + bsc.NetworkCode)
+	if err != nil {
+		return nil, fmt.Errorf("[%s] Failed to get master data: %w", bsc.NetworkCode, err)
+	}
+	masterAddr, ok := masterData["address"].(string)
+	if !ok || masterAddr == "" {
+		return nil, fmt.Errorf("[%s] Master address not found in Vault", bsc.NetworkCode)
+	}
+	masterAddr = strings.ToLower(masterAddr)
 
 	// Get current block number
 	if err := limiter.Wait(ctx); err != nil {
@@ -468,6 +524,13 @@ func (bsc *Bsc) GetInboundTransactions(ctx context.Context) ([]*InboundTransacti
 							log.Printf("[%s] Failed to get sender for tx '%s': %v", bsc.NetworkCode, txHash, err)
 							continue
 						}
+						fromAddr := strings.ToLower(from.Hex())
+
+						// Skip, if transaction sent from master wallet
+						if fromAddr == masterAddr {
+							log.Printf("[%s] Skipping '%s' tx from master wallet", bsc.NetworkCode, txHash)
+							continue
+						}
 
 						// Get converted amount (in BNB)
 						amount := utils.RemoveDecimals(tx.Value(), int64(bnbDecimals))
@@ -476,7 +539,7 @@ func (bsc *Bsc) GetInboundTransactions(ctx context.Context) ([]*InboundTransacti
 							UserId:   userId,
 							Currency: "BNB",
 							TxId:     txHash,
-							From:     strings.ToLower(from.Hex()),
+							From:     fromAddr,
 							To:       toAddr,
 							Amount:   amount,
 						})
@@ -507,6 +570,7 @@ func (bsc *Bsc) GetInboundTransactions(ctx context.Context) ([]*InboundTransacti
 							bsc.decimalsCacheMu.RLock()
 							decimalsValue, exists := bsc.decimalsCache[contractAddr]
 							bsc.decimalsCacheMu.RUnlock()
+
 							// Fetch from contract
 							if !exists {
 								if err := limiter.Wait(cancelCtx); err != nil {
@@ -526,7 +590,7 @@ func (bsc *Bsc) GetInboundTransactions(ctx context.Context) ([]*InboundTransacti
 										bsc.NetworkCode, contractAddr, err)
 									continue
 								}
-								decimalsValue = *abi.ConvertType(out[0], new(int64)).(*int64)
+								decimalsValue = int64(out[0].(uint8))
 
 								// Save decimals to cache
 								bsc.decimalsCacheMu.Lock()
@@ -541,6 +605,13 @@ func (bsc *Bsc) GetInboundTransactions(ctx context.Context) ([]*InboundTransacti
 									bsc.NetworkCode, txHash, err)
 								continue
 							}
+							fromAddr := strings.ToLower(from.Hex())
+
+							// Skip, if transaction sent from master wallet
+							if fromAddr == masterAddr {
+								log.Printf("[%s] Skipping '%s' tx from master wallet", bsc.NetworkCode, txHash)
+								continue
+							}
 
 							// Extract amount (bytes 36-68)
 							rawAmount := new(big.Int).SetBytes(tx.Data()[36:68])
@@ -551,7 +622,7 @@ func (bsc *Bsc) GetInboundTransactions(ctx context.Context) ([]*InboundTransacti
 								UserId:   userId,
 								Currency: token,
 								TxId:     txHash,
-								From:     strings.ToLower(from.Hex()),
+								From:     fromAddr,
 								To:       toAddr,
 								Amount:   amount,
 							})
@@ -709,22 +780,23 @@ func (bsc *Bsc) getNativeBalance(addr string) (float64, error) {
 // Returns: BEP20 token wallet balance
 func (bsc *Bsc) getBep20Balance(contractAddr, addr string) (float64, error) {
 	// Get contract instance
-	var out []interface{}
 	contract := bind.NewBoundContract(common.HexToAddress(contractAddr), bsc.ABI, bsc.Client, bsc.Client, bsc.Client)
 
 	// Get raw balance (in decimal)
-	err := contract.Call(&bind.CallOpts{}, &out, "balanceOf", common.HexToAddress(addr))
+	var balanceOut []interface{}
+	err := contract.Call(&bind.CallOpts{}, &balanceOut, "balanceOf", common.HexToAddress(addr))
 	if err != nil {
 		return 0, fmt.Errorf("failed to get contract balance: %w", err)
 	}
-	rawBalance := *abi.ConvertType(out[0], new(*big.Int)).(**big.Int)
+	rawBalance := balanceOut[0].(*big.Int)
 
 	// Get contract decimals
-	err = contract.Call(&bind.CallOpts{}, &out, "decimals")
+	var decimalsOut []interface{}
+	err = contract.Call(&bind.CallOpts{}, &decimalsOut, "decimals")
 	if err != nil {
 		return 0, fmt.Errorf("failed to get contract decimals: %w", err)
 	}
-	decimalsValue := *abi.ConvertType(out[0], new(int64)).(*int64)
+	decimalsValue := int64(decimalsOut[0].(uint8))
 
 	// Return converted balance with removed decimals
 	return utils.RemoveDecimals(rawBalance, decimalsValue), nil
@@ -776,7 +848,7 @@ func (bsc *Bsc) calcBep20Fee(currency, fromAddr, toAddr string, amount float64) 
 	if err != nil {
 		return 0, fmt.Errorf("failed to get contract decimals: %w", err)
 	}
-	decimalsValue := int64(*abi.ConvertType(out[0], new(uint8)).(*uint8))
+	decimalsValue := int64(out[0].(uint8))
 	// Convert amount to WEI with contract decimals
 	amountWei := utils.ApplyDecimals(amount, decimalsValue)
 
@@ -797,7 +869,7 @@ func (bsc *Bsc) calcBep20Fee(currency, fromAddr, toAddr string, amount float64) 
 	if err != nil {
 		gasLimit = uint64(cfg.GasLimit)
 	} else {
-		gasLimit = gasLimit + (gasLimit / uint64(cfg.FeeBuffer)) // +10% buffer
+		gasLimit = gasLimit + uint64(float64(gasLimit)*cfg.FeeBuffer) // +10% buffer
 	}
 
 	// Get current gas price
@@ -835,7 +907,8 @@ func (bsc *Bsc) sendNative(fromAddr, toAddr string, amount float64, privateKey s
 	}
 	// Check BNB balance before sending
 	if bnbBalance < amount+txFee {
-		return "", fmt.Errorf("insufficient balance: have %f %s, need %f + %f %s", bnbBalance, "BNB", amount, txFee, "BNB")
+		return "", fmt.Errorf("insufficient balance: have %f %s, need %f + %f (fee) %s",
+			bnbBalance, "BNB", amount, txFee, "BNB")
 	}
 
 	// Get BNB decimals from config
@@ -922,7 +995,7 @@ func (bsc *Bsc) sendBep20(currency, fromAddr, toAddr string, amount float64, pri
 	if err != nil {
 		return "", fmt.Errorf("failed to get contract decimals: %w", err)
 	}
-	decimalsValue := *abi.ConvertType(out[0], new(int64)).(*int64)
+	decimalsValue := int64(out[0].(uint8))
 	// Convert amount to WEI with contract decimals
 	amountWei := utils.ApplyDecimals(amount, decimalsValue)
 
@@ -943,7 +1016,7 @@ func (bsc *Bsc) sendBep20(currency, fromAddr, toAddr string, amount float64, pri
 	if err != nil {
 		gasLimit = uint64(cfg.GasLimit)
 	} else {
-		gasLimit = gasLimit + (gasLimit / uint64(cfg.FeeBuffer)) // +10% buffer
+		gasLimit = gasLimit + uint64(float64(gasLimit)*cfg.FeeBuffer) // +10% buffer
 	}
 
 	// Get current gas price

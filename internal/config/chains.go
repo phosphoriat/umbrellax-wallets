@@ -16,8 +16,9 @@ type (
 	}
 
 	TokenConfig struct {
-		Decimals        int
-		EstimatedEnergy int
+		Decimals          int
+		EstimatedEnergy   int
+		MinTransferAmount float64
 	}
 )
 
@@ -27,10 +28,10 @@ var ContractsAddresses = map[string]map[string]string{
 		"USDT": "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
 	},
 	"ethereum": {
-		"USDT": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+		"USDT": "0xdac17f958d2ee523a2206206994597c13d831ec7",
 	},
 	"bsc": {
-		"USDT": "0x55d398326f99059fF775485246999027B3197955",
+		"USDT": "0x55d398326f99059ff775485246999027b3197955",
 	},
 	"ton": {
 		"USDT":     "EQCxE6mUtQJKFnGfaROTKOt1lZbDiiX1kCixRv7Nw2Id_sDs",
@@ -69,9 +70,9 @@ var NetworkSettings = map[string]NetworkConfig{
 		NativeToken:  "TON",
 		BybitAddress: "UQAjUG-ewikNc-uEtZLCM0DbxkV2SgCh27Wyf6-JzNexlrvG",
 		FeeBuffer:    0.05,
-		ForwardFee:   "0.02",
-		MessageFee:   "0.01",
-		FallbackFee:  0.05,
+		ForwardFee:   "0.01",
+		MessageFee:   "0.1",
+		FallbackFee:  0.1,
 		BlockTime:    5,
 	},
 	"bitcoin": {
@@ -93,42 +94,51 @@ var NetworkSettings = map[string]NetworkConfig{
 var TokenSettings = map[string]map[string]TokenConfig{
 	"tron": {
 		"TRX": {
-			Decimals:        6,
-			EstimatedEnergy: 0,
+			Decimals:          6,
+			EstimatedEnergy:   0,
+			MinTransferAmount: 0.1,
 		},
 		"USDT": {
-			EstimatedEnergy: 85000,
+			EstimatedEnergy:   85000,
+			MinTransferAmount: 0.1,
 		},
 	},
 	"ethereum": {
 		"ETH": {
-			Decimals: 18,
+			Decimals:          18,
+			MinTransferAmount: 0.0001,
 		},
 	},
 	"bsc": {
 		"BNB": {
-			Decimals: 18,
+			Decimals:          18,
+			MinTransferAmount: 0.001,
 		},
 	},
 	"ton": {
 		"TON": {
-			Decimals: 9,
+			Decimals:          9,
+			MinTransferAmount: 0.1,
 		},
 		"USDT": {
-			Decimals: 6,
+			Decimals:          6,
+			MinTransferAmount: 0.1,
 		},
 		"UMBRELLA": {
-			Decimals: 15,
+			Decimals:          15,
+			MinTransferAmount: 0.1,
 		},
 	},
 	"bitcoin": {
 		"BTC": {
-			Decimals: 8,
+			Decimals:          8,
+			MinTransferAmount: 0.00001,
 		},
 	},
 	"solana": {
 		"SOL": {
-			Decimals: 9,
+			Decimals:          9,
+			MinTransferAmount: 0.01,
 		},
 	},
 }

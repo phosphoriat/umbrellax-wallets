@@ -15,6 +15,7 @@ import (
 	"wallets/internal/database/vault"
 	"wallets/internal/repository"
 	"wallets/internal/services/api/bybit"
+	"wallets/internal/services/api/notifications"
 	"wallets/internal/utils"
 
 	"github.com/btcsuite/btcd/btcutil/hdkeychain"
@@ -117,7 +118,7 @@ func (eth *Ethereum) GetUserWalletAddress(userId uint32) (string, error) {
 		return "", fmt.Errorf("failed to derive address for user %d: %w", userId, err)
 	}
 
-	return addr, nil
+	return strings.ToLower(addr), nil
 }
 
 // GetUserWallet Get user wallet info (address and token balances)
@@ -152,6 +153,35 @@ func (eth *Ethereum) GetUserWallet(userId uint32) (map[string]any, error) {
 		"address":  userAddr,
 		"balances": balances,
 	}, nil
+}
+
+// GetUserWalletBalance Get token balance amount for user wallet
+// userId: User id
+// currency: Token ticker
+// Returns Balance amount for token
+func (eth *Ethereum) GetUserWalletBalance(userId uint32, currency string) (float64, error) {
+	// Get user wallet address
+	userAddr, _, err := eth.getWallet("user", &userId)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get user wallet address: %w", err)
+	}
+
+	var balance float64
+	if currency == "ETH" {
+		balance, err = eth.getNativeBalance(userAddr)
+	} else {
+		contractAddr, ok := config.ContractsAddresses[eth.NetworkCode][currency]
+		if !ok {
+			return 0, fmt.Errorf("unsupported currency %q on network %s", currency, eth.NetworkCode)
+		}
+
+		balance, err = eth.getErc20Balance(contractAddr, userAddr)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("failed to get balance for user %d: %w", userId, err)
+	}
+
+	return balance, nil
 }
 
 // GetMasterWallet Get master wallet info (address and token balances)
@@ -191,30 +221,33 @@ func (eth *Ethereum) GetMasterWallet() (map[string]any, error) {
 	}, nil
 }
 
-// GetUserWalletBalance Get token balance amount for user wallet
-// userId: User id
+// GetMasterWalletBalance Get token balance amount for master wallet
 // currency: Token ticker
 // Returns Balance amount for token
-func (eth *Ethereum) GetUserWalletBalance(userId uint32, currency string) (float64, error) {
-	// Get user wallet address
-	userAddr, _, err := eth.getWallet("user", &userId)
+func (eth *Ethereum) GetMasterWalletBalance(currency string) (float64, error) {
+	// Get master wallet info from Vault
+	masterData, err := vault.GetClient().GetSecret("master/" + eth.NetworkCode)
 	if err != nil {
-		return 0, fmt.Errorf("failed to get user wallet address: %w", err)
+		return 0, fmt.Errorf("failed to get master data: %w", err)
+	}
+	masterAddr, ok := masterData["address"].(string)
+	if !ok || masterAddr == "" {
+		return 0, fmt.Errorf("master address not found in Vault")
 	}
 
 	var balance float64
 	if currency == "ETH" {
-		balance, err = eth.getNativeBalance(userAddr)
+		balance, err = eth.getNativeBalance(masterAddr)
 	} else {
 		contractAddr, ok := config.ContractsAddresses[eth.NetworkCode][currency]
 		if !ok {
 			return 0, fmt.Errorf("unsupported currency %q on network %s", currency, eth.NetworkCode)
 		}
 
-		balance, err = eth.getErc20Balance(contractAddr, userAddr)
+		balance, err = eth.getErc20Balance(contractAddr, masterAddr)
 	}
 	if err != nil {
-		return 0, fmt.Errorf("failed to get balance for user %d: %w", userId, err)
+		return 0, fmt.Errorf("failed to get %s balance for %s master wallet: %w", currency, eth.NetworkCode, err)
 	}
 
 	return balance, nil
@@ -244,7 +277,7 @@ func (eth *Ethereum) GetTransactionCommission(oType, wType string, wId *uint32, 
 		chainFee, err = eth.calcErc20Fee(currency, walletAddr, toAddr, amount)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to get transaction commission: %w", err)
+		return nil, err
 	}
 
 	var bybitFee, amlFee float64
@@ -312,6 +345,18 @@ func (eth *Ethereum) SendTransaction(wType string, wId *uint32, currency, toAddr
 	}
 
 	if err != nil {
+		// Send notifications to channels
+		wIdPart := ""
+		if wType == "user" {
+			wIdPart = fmt.Sprintf(" [ID: %d]", wId)
+		}
+		errMsg := fmt.Sprintf("[SendTransaction] [%s] failed to send transaction (%f %s) from %s%s to %s: %v",
+			eth.NetworkCode, amount, currency, wType, wIdPart, toAddr, err)
+		errSend := notifications.GetClient().SendNotifications(context.Background(), errMsg)
+		if errSend != nil {
+			return "", errSend
+		}
+
 		return "", fmt.Errorf("failed to send transaction: %w", err)
 	}
 
@@ -324,6 +369,17 @@ func (eth *Ethereum) SendTransaction(wType string, wId *uint32, currency, toAddr
 func (eth *Ethereum) GetInboundTransactions(ctx context.Context) ([]*InboundTransaction, error) {
 	// Create rate limiter
 	limiter := rate.NewLimiter(rate.Limit(eth.RateLimit), 1)
+
+	// Get master wallet for network
+	masterData, err := vault.GetClient().GetSecret("master/" + eth.NetworkCode)
+	if err != nil {
+		return nil, fmt.Errorf("[%s] Failed to get master data: %w", eth.NetworkCode, err)
+	}
+	masterAddr, ok := masterData["address"].(string)
+	if !ok || masterAddr == "" {
+		return nil, fmt.Errorf("[%s] Master address not found in Vault", eth.NetworkCode)
+	}
+	masterAddr = strings.ToLower(masterAddr)
 
 	// Get current block number
 	if err := limiter.Wait(ctx); err != nil {
@@ -469,6 +525,13 @@ func (eth *Ethereum) GetInboundTransactions(ctx context.Context) ([]*InboundTran
 							log.Printf("[%s] Failed to get sender for tx '%s': %v", eth.NetworkCode, txHash, err)
 							continue
 						}
+						fromAddr := strings.ToLower(from.Hex())
+
+						// Skip, if transaction sent from master wallet
+						if fromAddr == masterAddr {
+							log.Printf("[%s] Skipping '%s' tx from master wallet", eth.NetworkCode, txHash)
+							continue
+						}
 
 						// Get converted amount (in ETH)
 						amount := utils.RemoveDecimals(tx.Value(), int64(ethDecimals))
@@ -477,7 +540,7 @@ func (eth *Ethereum) GetInboundTransactions(ctx context.Context) ([]*InboundTran
 							UserId:   userId,
 							Currency: "ETH",
 							TxId:     txHash,
-							From:     strings.ToLower(from.Hex()),
+							From:     fromAddr,
 							To:       toAddr,
 							Amount:   amount,
 						})
@@ -508,6 +571,7 @@ func (eth *Ethereum) GetInboundTransactions(ctx context.Context) ([]*InboundTran
 							eth.decimalsCacheMu.RLock()
 							decimalsValue, exists := eth.decimalsCache[contractAddr]
 							eth.decimalsCacheMu.RUnlock()
+
 							// Fetch from contract
 							if !exists {
 								if err := limiter.Wait(cancelCtx); err != nil {
@@ -525,7 +589,7 @@ func (eth *Ethereum) GetInboundTransactions(ctx context.Context) ([]*InboundTran
 										eth.NetworkCode, contractAddr, err)
 									continue
 								}
-								decimalsValue = *abi.ConvertType(out[0], new(int64)).(*int64)
+								decimalsValue = int64(out[0].(uint8))
 
 								// Save decimals to cache
 								eth.decimalsCacheMu.Lock()
@@ -539,6 +603,13 @@ func (eth *Ethereum) GetInboundTransactions(ctx context.Context) ([]*InboundTran
 								log.Printf("[%s] Failed to get sender for tx '%s': %v", eth.NetworkCode, txHash, err)
 								continue
 							}
+							fromAddr := strings.ToLower(from.Hex())
+
+							// Skip, if transaction sent from master wallet
+							if fromAddr == masterAddr {
+								log.Printf("[%s] Skipping '%s' tx from master wallet", eth.NetworkCode, txHash)
+								continue
+							}
 
 							// Extract amount (bytes 36-68)
 							rawAmount := new(big.Int).SetBytes(tx.Data()[36:68])
@@ -549,7 +620,7 @@ func (eth *Ethereum) GetInboundTransactions(ctx context.Context) ([]*InboundTran
 								UserId:   userId,
 								Currency: token,
 								TxId:     txHash,
-								From:     strings.ToLower(from.Hex()),
+								From:     fromAddr,
 								To:       toAddr,
 								Amount:   amount,
 							})
@@ -707,22 +778,23 @@ func (eth *Ethereum) getNativeBalance(addr string) (float64, error) {
 // Returns: ERC20 token wallet balance
 func (eth *Ethereum) getErc20Balance(contractAddr, addr string) (float64, error) {
 	// Get contract instance
-	var out []interface{}
 	contract := bind.NewBoundContract(common.HexToAddress(contractAddr), eth.ABI, eth.Client, eth.Client, eth.Client)
 
 	// Get raw balance (in decimal)
-	err := contract.Call(&bind.CallOpts{}, &out, "balanceOf", common.HexToAddress(addr))
+	var balanceOut []interface{}
+	err := contract.Call(&bind.CallOpts{}, &balanceOut, "balanceOf", common.HexToAddress(addr))
 	if err != nil {
 		return 0, fmt.Errorf("failed to get contract balance: %w", err)
 	}
-	rawBalance := *abi.ConvertType(out[0], new(*big.Int)).(**big.Int)
+	rawBalance := balanceOut[0].(*big.Int)
 
 	// Get contract decimals
-	err = contract.Call(&bind.CallOpts{}, &out, "decimals")
+	var decimalsOut []interface{}
+	err = contract.Call(&bind.CallOpts{}, &decimalsOut, "decimals")
 	if err != nil {
 		return 0, fmt.Errorf("failed to get contract decimals: %w", err)
 	}
-	decimalsValue := *abi.ConvertType(out[0], new(int64)).(*int64)
+	decimalsValue := int64(decimalsOut[0].(uint8))
 
 	// Return converted balance with removed decimals
 	return utils.RemoveDecimals(rawBalance, decimalsValue), nil
@@ -774,7 +846,7 @@ func (eth *Ethereum) calcErc20Fee(currency, fromAddr, toAddr string, amount floa
 	if err != nil {
 		return 0, fmt.Errorf("failed to get contract decimals: %w", err)
 	}
-	decimalsValue := int64(*abi.ConvertType(out[0], new(uint8)).(*uint8))
+	decimalsValue := int64(out[0].(uint8))
 	// Convert amount to WEI with contract decimals
 	amountWei := utils.ApplyDecimals(amount, decimalsValue)
 
@@ -795,7 +867,7 @@ func (eth *Ethereum) calcErc20Fee(currency, fromAddr, toAddr string, amount floa
 	if err != nil {
 		gasLimit = uint64(cfg.GasLimit)
 	} else {
-		gasLimit = gasLimit + (gasLimit * uint64(cfg.FeeBuffer)) // +10% buffer
+		gasLimit = gasLimit + uint64(float64(gasLimit)*cfg.FeeBuffer) // +10% buffer
 	}
 
 	// Get current gas price
@@ -832,7 +904,8 @@ func (eth *Ethereum) sendNative(fromAddr, toAddr string, amount float64, private
 	}
 	// Check ETH balance before sending
 	if trxBalance < amount+txFee {
-		return "", fmt.Errorf("insufficient balance: have %f %s, need %f + %f %s", trxBalance, "ETH", amount, txFee, "ETH")
+		return "", fmt.Errorf("insufficient balance: have %f %s, need %f + %f (fee) %s",
+			trxBalance, "ETH", amount, txFee, "ETH")
 	}
 
 	// Get ETH decimals from config
@@ -921,7 +994,7 @@ func (eth *Ethereum) sendErc20(currency, fromAddr, toAddr string, amount float64
 	if err != nil {
 		return "", fmt.Errorf("failed to get contract decimals: %w", err)
 	}
-	decimalsValue := *abi.ConvertType(out[0], new(int64)).(*int64)
+	decimalsValue := int64(out[0].(uint8))
 	// Convert amount to WEI with contract decimals
 	amountWei := utils.ApplyDecimals(amount, decimalsValue)
 
@@ -942,7 +1015,7 @@ func (eth *Ethereum) sendErc20(currency, fromAddr, toAddr string, amount float64
 	if err != nil {
 		gasLimit = uint64(cfg.GasLimit)
 	} else {
-		gasLimit = gasLimit + (gasLimit / uint64(cfg.FeeBuffer)) // +10% buffer
+		gasLimit = gasLimit + uint64(float64(gasLimit)*cfg.FeeBuffer) // +10% buffer
 	}
 
 	// Get current gas price
