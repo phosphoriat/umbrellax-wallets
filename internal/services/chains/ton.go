@@ -452,16 +452,6 @@ func (ton *Ton) GetInboundTransactions(ctx context.Context) ([]*InboundTransacti
 	// Create rate limiter
 	limiter := rate.NewLimiter(rate.Limit(ton.RateLimit), 1)
 
-	// Get last logical time (LT) from Redis
-	lastLTStr, err := redis.GetClient().HGet(ctx, "last_blocks", ton.NetworkCode)
-	var lastProcessedLT uint64
-	if err != nil || lastLTStr == "" {
-		lastProcessedLT = 0
-		log.Printf("[%s] First run, starting from LT 0", ton.NetworkCode)
-	} else {
-		lastProcessedLT, _ = strconv.ParseUint(lastLTStr, 10, 64)
-	}
-
 	// Get master wallet address from Vault
 	masterData, err := vault.GetClient().GetSecret("master/" + ton.NetworkCode)
 	if err != nil {
@@ -470,9 +460,6 @@ func (ton *Ton) GetInboundTransactions(ctx context.Context) ([]*InboundTransacti
 	masterAddrStr := masterData["address"].(string)
 	// Parse master address
 	masterAddr := address.MustParseAddr(masterAddrStr)
-
-	// Get TON decimals from config
-	tonDecimals := config.TokenSettings[ton.NetworkCode]["TON"].Decimals
 
 	// Get current block
 	if err := limiter.Wait(ctx); err != nil {
@@ -492,11 +479,30 @@ func (ton *Ton) GetInboundTransactions(ctx context.Context) ([]*InboundTransacti
 		return nil, fmt.Errorf("[%s] Failed to get account: %w", ton.NetworkCode, err)
 	}
 
+	// Get last logical time (LT) from Redis
+	lastLTStr, err := redis.GetClient().HGet(ctx, "last_blocks", ton.NetworkCode)
+	var lastProcessedLT uint64
+	if err != nil || lastLTStr == "" {
+		lastProcessedLT = account.LastTxLT
+		log.Printf("[%s] First run, starting from current LT %d", ton.NetworkCode, lastProcessedLT)
+
+		// Save LT in Redis
+		err = redis.GetClient().HSet(ctx, "last_blocks", ton.NetworkCode, account.LastTxLT)
+		if err != nil {
+			return nil, fmt.Errorf("[%s] Failed to save initial LT in Redis: %w", ton.NetworkCode, err)
+		}
+		return []*InboundTransaction{}, nil
+	} else {
+		lastProcessedLT, _ = strconv.ParseUint(lastLTStr, 10, 64)
+	}
+
+	// Get TON decimals from config
+	tonDecimals := config.TokenSettings[ton.NetworkCode]["TON"].Decimals
+
 	// Check, if no transactions on account yet
 	if account.LastTxLT == 0 {
 		return []*InboundTransaction{}, nil
 	}
-
 	// Check, if no new transactions since last check
 	if account.LastTxLT <= lastProcessedLT {
 		log.Printf("[%s] No new raw txs to search (lastLT: %d, accountLT: %d)",

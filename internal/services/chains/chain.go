@@ -8,13 +8,13 @@ import (
 	"log"
 	"sync"
 	"time"
-	"wallets/internal/services/api/bybit"
 
 	"wallets/internal/config"
 	"wallets/internal/database/redis"
 	"wallets/internal/models"
 	"wallets/internal/repository"
 	"wallets/internal/services/api/aml"
+	"wallets/internal/services/api/bybit"
 	"wallets/internal/services/api/notifications"
 	"wallets/internal/services/api/rates"
 
