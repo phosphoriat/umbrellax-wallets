@@ -56,17 +56,15 @@ func (r *TaskRegistry) initializeDefinitions() []*TaskDefinition {
 	))
 
 	// Process inbound transactions (every 10 seconds)
-	/*
-		definitions = append(definitions, NewTaskDefinition(
-			NewRefillsTask(),
-			TaskSchedule{
-				Type:               ScheduleTypeInterval,
-				Interval:           "10s",
-				SkipIfStillRunning: true,
-			},
-			true,
-		))
-	*/
+	definitions = append(definitions, NewTaskDefinition(
+		NewRefillsTask(),
+		TaskSchedule{
+			Type:               ScheduleTypeInterval,
+			Interval:           "10s",
+			SkipIfStillRunning: true,
+		},
+		true,
+	))
 
 	return definitions
 }
