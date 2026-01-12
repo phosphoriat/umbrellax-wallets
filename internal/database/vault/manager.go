@@ -19,6 +19,8 @@ type Client struct {
 	mu              sync.RWMutex
 	ctx             context.Context
 	cancel          context.CancelFunc
+	roleId          string
+	secretId        string
 	lifetimeWatcher *api.LifetimeWatcher
 }
 
@@ -90,9 +92,11 @@ func newVaultClient(cfg *config.Config) (*Client, error) {
 	clientCtx, clientCancel := context.WithCancel(context.Background())
 	// Create client entity
 	client := &Client{
-		vault:  vaultClient,
-		ctx:    clientCtx,
-		cancel: clientCancel,
+		vault:    vaultClient,
+		ctx:      clientCtx,
+		cancel:   clientCancel,
+		roleId:   cfg.VaultRoleId,
+		secretId: cfg.VaultSecretId,
 	}
 
 	// Auth using AppRole
@@ -279,8 +283,20 @@ func (c *Client) startTokenRenewal() error {
 				if err != nil {
 					log.Printf("Vault token renewal failed: %v", err)
 				}
-				// Token reached maximum TTL, reauthentication required
-				log.Printf("Vault token renewal stopped, re-authentication may be required")
+				log.Printf("Vault token expired, attempting re-authentication...")
+
+				// Stop old watcher
+				watcher.Stop()
+				if err := c.authWithAppRole(c.roleId, c.secretId); err != nil {
+					log.Printf("Re-authentication failed: %v", err)
+					return
+				}
+
+				// Restart token renewal after re-auth
+				if err := c.startTokenRenewal(); err != nil {
+					log.Printf("Failed to restart token renewal: %v", err)
+				}
+
 				return
 
 			case renewal := <-watcher.RenewCh():
