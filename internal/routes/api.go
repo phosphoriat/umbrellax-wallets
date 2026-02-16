@@ -5,7 +5,7 @@ import (
 	"wallets/internal/repository"
 	"wallets/internal/services"
 
-	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v3"
 )
 
 func SetupRoutes(app *fiber.App) {
